@@ -1,0 +1,67 @@
+namespace MqttRelayService.Options;
+
+/// <summary>
+/// 可靠性配置选项
+/// </summary>
+public class ReliabilityOptions
+{
+    /// <summary>
+    /// 投递语义，默认 AtLeastOnce
+    /// </summary>
+    public string DeliverySemantics { get; set; } = "AtLeastOnce";
+
+    /// <summary>
+    /// 内部队列容量上限
+    /// </summary>
+    public int QueueCapacity { get; set; } = 1000;
+
+    /// <summary>
+    /// 入队等待超时（毫秒）
+    /// </summary>
+    public int EnqueueTimeoutMs { get; set; } = 2000;
+
+    /// <summary>
+    /// 最大并发处理数
+    /// </summary>
+    public int MaxConcurrentHandlers { get; set; } = 1;
+
+    /// <summary>
+    /// 最大重试次数
+    /// </summary>
+    public int MaxRetryCount { get; set; } = 3;
+
+    /// <summary>
+    /// 重试基础延迟（毫秒）
+    /// </summary>
+    public int RetryBaseDelayMs { get; set; } = 1000;
+
+    /// <summary>
+    /// 重试最大延迟（毫秒）
+    /// </summary>
+    public int RetryMaxDelayMs { get; set; } = 30000;
+
+    /// <summary>
+    /// 是否启用死信
+    /// </summary>
+    public bool EnableDeadLetter { get; set; } = true;
+
+    /// <summary>
+    /// 死信文件存储路径
+    /// </summary>
+    public string DeadLetterPath { get; set; } = "data/deadletter";
+
+    /// <summary>
+    /// 单次转发超时（毫秒）
+    /// </summary>
+    public int ForwardTimeoutMs { get; set; } = 5000;
+
+    /// <summary>
+    /// 停机排空超时（毫秒）
+    /// </summary>
+    public int ShutdownDrainTimeoutMs { get; set; } = 10000;
+
+    /// <summary>
+    /// 队列满时是否丢弃新消息（否则阻塞等待）
+    /// </summary>
+    public bool DropWhenQueueFull { get; set; } = false;
+}
