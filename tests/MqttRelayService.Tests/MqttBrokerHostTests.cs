@@ -1,3 +1,4 @@
+using System.Text;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using MQTTnet.Packets;
@@ -18,7 +19,7 @@ public class MqttBrokerHostTests
         var packet = new MqttPublishPacket();
         // MqttPublishPacket.UserProperties 默认可能为 null，通过反射初始化
         var prop = typeof(MqttPublishPacket).GetProperty("UserProperties");
-        var list = new List<MqttUserProperty> { new MqttUserProperty(name, value) };
+        var list = new List<MqttUserProperty> { new MqttUserProperty(name, Encoding.UTF8.GetBytes(value)) };
         prop?.SetValue(packet, list);
         return packet;
     }

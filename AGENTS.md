@@ -1,4 +1,4 @@
-# RYB.MQTT Codex Working Agreement
+# MqttRelayService Codex Working Agreement
 
 这个仓库面向 `.NET 8 Worker Service + MQTTnet Broker` 的长期演进，文档、上下文和代码都要按“可持续维护”来组织。
 

@@ -101,9 +101,7 @@ powershell -ExecutionPolicy Bypass -NoProfile -Command "& '%~dp0install-service.
 
 **现象**：`HandleFailureAsync` 设置 `NextRetryAt` 后立即重新入队，消费循环不检查时间戳，重试消息被瞬间再次消费。
 
-**解决（第一版）**：在 `HandleFailureAsync` 中 `await Task.Delay(delay)` 后再入队。当前单消费者场景下可接受。
-
-**更优方案（待后续任务）**：引入独立延迟队列，消费者从延迟队列读取已到期的消息，避免阻塞主消费者。
+**解决**：在 `HandleFailureAsync` 中计算退避延迟后 `await Task.Delay(delay)` 再重新入队。多消费者场景下，单个消费者的延迟阻塞不影响其他消费者。未实现独立延迟队列。
 
 ### 6.4 EchoToSender 必须在 Broker 分发层拦截
 

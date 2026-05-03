@@ -1,169 +1,226 @@
-# MqttRelayService Agent Working Agreement
+# MqttRelayService
 
-这个仓库面向 `.NET 8 Worker Service + MQTTnet Broker` 的长期演进，文档、上下文和代码都要按“可持续维护”来组织。
+基于 `.NET 8 Worker Service + MQTTnet` 的单机 MQTT 消息转发服务。
 
-本文件是本仓库所有代码 Agent 的工作协议，不只适用于 Codex，也适用于 OpenCode、Kimi、Claude Code 或其他代码 Agent。
+## 项目用途
 
-## 强制启动流程
+MqttRelayService 是一个轻量级单机 MQTT Broker，用于在局域网或单台服务器上提供 MQTT 消息接入和转发能力。服务启动后会监听指定 TCP 端口，接收客户端发布的消息，通过内部队列进行 Topic 匹配和转发，支持重试、死信和优雅停机排空。
 
-每次新会话、每次新任务、每次接手当前仓库时，必须先读取以下文件：
+主要能力：
+- 单机 MQTT Broker（默认端口 `1883`）
+- 基于 Topic 的消息路由（支持 `#` 和 `+` 通配符）
+- 内部有界队列 + 后台消费投递
+- 转发失败自动重试（指数退避）
+- 超过重试次数进入死信（JSON 文件记录）
+- 优雅停机时尽量排空队列中剩余消息
+- 可选阻止消息回发给发送方自身（`EchoToSender=false`）
 
-1. `AGENTS.md`
-2. `lessons.md`
-3. `.codex/documents/01-长期有效规范/仓库上下文管理入口.md`
+## 运行环境
 
-如果任务涉及结构判断、跨文件修改、代码 Review、需求符合度检查、测试补充或交付验收，还必须继续读取：
+- **操作系统**：Windows 10/11、Windows Server 2019/2022
+- **运行时**：.NET 8 SDK（[下载](https://dotnet.microsoft.com/download/dotnet/8.0)）
+- **目标平台**：`win-x64`
+- **默认端口**：`1883`
 
-4. `.codex/documents/02-仓库地图/全仓库代码地图.md`
-5. `.codex/documents/03-历史任务记录/` 下与当前任务最相关的最新记录
+## 本地调试
 
-读取完成后，先回复：
+从仓库根目录执行：
 
-> 已读取仓库启动上下文。
+```powershell
+dotnet run --project src/MqttRelayService/MqttRelayService.csproj
+```
 
-然后再开始执行任务。
+服务启动后会输出日志到控制台，并监听 `1883` 端口。按 `Ctrl+C` 可触发优雅停机。
 
-如果上述文件不存在，应明确说明缺失文件，不要假装已经读取。
+## 发布方式
 
-## 主要目标
+```powershell
+dotnet publish src/MqttRelayService/MqttRelayService.csproj -c Release -r win-x64 --self-contained
+```
 
-帮助仓库在单机 MQTT Broker、转发队列、重试、死信、Windows Service 部署和可观测性这些方向上稳定迭代，同时避免把业务实现写散、写乱。
+发布输出位于：
+```
+src/MqttRelayService/bin/Release/net8.0/win-x64/publish/
+```
 
-## 默认工作流
+## Windows Service 安装与卸载
 
-按变更规模选择工作方式。
+### 安装
 
-### 小改动
+1. 先完成发布（见上方命令）
+2. 以**管理员身份**打开命令提示符
+3. 进入发布目录：
+   ```powershell
+   cd src/MqttRelayService/bin/Release/net8.0/win-x64/publish
+   ```
+4. 执行安装脚本：
+   ```powershell
+   Scripts\install-service.cmd
+   ```
 
-适用场景：
+### 卸载
 
-- 文档补充
-- 配置说明
-- 单个文件的小修正
-- 明显的注释或说明修订
+```powershell
+Scripts\uninstall-service.cmd
+```
 
-执行顺序：
+安装成功后，服务名称为 `MqttRelayService`，启动类型为 `Automatic`。可通过 Windows 服务管理器查看状态。
 
-1. 先确认目标文件和影响范围。
-2. 直接做最小必要修改。
-3. 做最小但足够的可读性或一致性检查。
-4. 交付时说明改了什么、验证了什么、还有什么没验证。
+## 配置说明
 
-### 中改动
+所有配置通过 `appsettings.json` 管理，发布后该文件与可执行文件位于同一目录，修改后需重启服务生效。
 
-适用场景：
+### 配置项一览
 
-- 跨 2 到 6 个文件的改动
-- 需要同步更新上下文目录、代码地图或历史记录
-- 需要说明结构变化、运行边界或可靠性边界
+```json
+{
+  "Service": {
+    "Name": "MqttRelayService"
+  },
+  "Mqtt": {
+    "TcpPort": 1883,
+    "DefaultQos": 1
+  },
+  "Auth": {
+    "AllowAnonymous": true,
+    "Users": [
+      {
+        "Username": "app1",
+        "Password": "123456",
+        "ClientIdPrefix": "app1"
+      }
+    ]
+  },
+  "Routing": {
+    "EchoToSender": false
+  },
+  "Reliability": {
+    "DeliverySemantics": "AtLeastOnce",
+    "QueueCapacity": 1000,
+    "EnqueueTimeoutMs": 2000,
+    "MaxConcurrentHandlers": 1,
+    "MaxRetryCount": 3,
+    "RetryBaseDelayMs": 1000,
+    "RetryMaxDelayMs": 30000,
+    "EnableDeadLetter": true,
+    "DeadLetterPath": "data/deadletter",
+    "ForwardTimeoutMs": 5000,
+    "ShutdownDrainTimeoutMs": 10000,
+    "DropWhenQueueFull": false
+  },
+  "Serilog": {
+    "FileNamePrefix": "relay",
+    "RetentionDays": 30,
+    "MinimumLevel": {
+      "Default": "Information"
+    }
+  }
+}
+```
 
-执行顺序：
+### 配置项说明
 
-1. 先写一份简短实现说明或上下文说明。
-2. 说明目标、影响面、关键决策、验证方式。
-3. 再分批修改。
-4. 改完后回写相关上下文文档。
+| 配置节 | 键 | 说明 |
+|--------|-----|------|
+| **Service** | `Name` | Windows Service 名称 |
+| **Mqtt** | `TcpPort` | Broker 监听端口 |
+| **Mqtt** | `DefaultQos` | 默认 QoS 等级 |
+| **Auth** | `AllowAnonymous` | 是否允许匿名连接 |
+| **Auth** | `Users` | 预设用户名/密码/ClientId 前缀列表 |
+| **Routing** | `EchoToSender` | `true` 时发送方会收到自己发布的消息；`false` 时不会 |
+| **Reliability** | `QueueCapacity` | 内部转发队列容量上限 |
+| **Reliability** | `MaxConcurrentHandlers` | 后台消费并发数（最小值为 1） |
+| **Reliability** | `MaxRetryCount` | 单条消息最大重试次数 |
+| **Reliability** | `RetryBaseDelayMs` | 重试退避基础延迟（毫秒） |
+| **Reliability** | `ShutdownDrainTimeoutMs` | 停机时队列排空超时（毫秒） |
+| **Reliability** | `EnableDeadLetter` | 是否启用死信记录 |
+| **Reliability** | `DeadLetterPath` | 死信文件存储目录 |
+| **Serilog** | `RetentionDays` | 日志文件保留天数 |
 
-### 大改动
+## Topic 规范
 
-适用场景：
+服务支持标准 MQTT Topic 格式，层级使用 `/` 分隔，支持以下通配符：
 
-- 解决方案级调整
-- Broker、队列、重试、死信、安装方式这类核心链路变化
-- 需要明确可靠性边界或部署边界的改动
+- `#`：匹配该层级及所有后续层级（必须放在 Topic 末尾）
+- `+`：匹配单个层级
 
-执行顺序：
+示例：
 
-1. 先写设计或实现说明。
-2. 明确不做什么，避免范围漂移。
-3. 分批实施，每批都做一次验证。
-4. 最后把结构事实沉淀回仓库地图和历史记录。
+| Topic | 说明 |
+|-------|------|
+| `apps/{appId}/up` | 设备上行数据 |
+| `apps/{appId}/down` | 平台下行指令 |
+| `broadcast/all` | 全量广播 |
+| `events/{eventType}` | 事件通知 |
+| `rpc/{clientId}/request` | RPC 请求 |
+| `rpc/{clientId}/response` | RPC 响应 |
 
-## 验证顺序
+## 可靠性边界
 
-优先顺序如下：
+当前版本实现以下可靠性保证：
 
-1. 先验证最受影响的工程或入口。
-2. 再验证真实运行路径，而不是只看静态文件。
-3. 文档任务则先做一致性检查，再做可读性检查。
-4. 代码任务完成后，优先执行 `dotnet build`。
-5. 涉及测试或核心逻辑时，继续执行 `dotnet test`。
-6. 如果无法执行验证命令，必须明确说明原因，不要声称已验证。
+- **至少一次（At-Least-Once）**：消息转发失败后会自动重试，最多 `MaxRetryCount` 次
+- **有界队列**：内部队列有容量上限，满时根据配置选择等待或丢弃
+- **异常隔离**：单条消息处理失败不会导致消费者退出或其他消息受影响
+- **优雅停机**：收到停止信号后，先在超时内排空队列中剩余消息再退出
 
-## 仓库级要求
+**当前限制**：
+- 使用**内存队列**（`InMemoryMessageQueue`），进程异常退出或机器宕机时，未完成转发的内存消息会丢失
+- 死信记录写入本地 JSON 文件，不依赖外部存储
+- 未实现磁盘队列或消息持久化
 
-- 本仓库当前由主线程和文档线程并行工作，看到别人的修改不要回退，先适配现有状态。
-- 默认只做最小必要修改，不把顺手重构混进当前任务。
-- 这个仓库的主体是 MQTT Worker Service，不是 UI 项目；所有上下文、文档和示例都要围绕 Broker、订阅、消息生命周期、重试和死信来写。
-- MQTT 事件回调必须保持轻量，耗时工作要下沉到内部队列和后台消费者。
-- 队列必须有容量上限，不能出现无界内存增长。
-- 内部消息消费者不得通过固定间隔轮询队列。
-- 内部消息消费者应使用 `ChannelReader.ReadAllAsync`、`ReadAsync` 或 `WaitToReadAsync` 等异步等待机制。
-- 队列为空时消费者应异步挂起等待，不得通过 `TryRead` / `TryDequeue` + `Task.Delay` 短间隔轮询。
-- 所有后台入口都要顶层捕获异常，不能让未处理异常直接停止 Host。
-- 单条消息处理失败不得导致整个消费者退出。
-- 单个客户端异常不得导致 Broker 停止或影响其他客户端。
-- 如果第一版没有磁盘队列，README 和上下文文档都要明确说明可靠性边界。
-- 新增或修改中文文本后，要做一次快速可读性检查，确认没有乱码。
-- 本仓库项目名统一使用 `MqttRelayService`。
-- 不要引入或恢复 `RYB.` 前缀。
-- 如果发现旧文档、旧路径或旧说明中仍存在 `RYB.`，应在当前任务范围允许的情况下同步修正；如果不属于当前任务范围，应在交付说明中列为风险或后续建议。
+## 当前不支持的能力
 
-## 中文注释要求
+以下能力在当前版本中**未实现**，如后续有需求需单独评估：
 
-- 新增或修改的公共类、接口、核心模型，默认要补中文注释。
-- 关键流程方法需要补中文注释，尤其是 Broker 启停、事件处理、入队出队、路由、重试、死信和优雅停机。
-- 注释要解释职责、边界和设计意图，不做逐行翻译。
-- 不要为了注释而堆砌空话，注释应帮助后续维护者理解为什么这样设计。
+- 磁盘队列或消息持久化
+- 集群部署或多节点桥接
+- 连接外部 MQTT Broker（桥接模式）
+- Web 管理后台
+- 严格按客户端级别的点对点直投（当前采用 Topic 注入 + 出站拦截实现）
+- 完整的 ACL（访问控制列表），当前仅支持基于预设用户的简单认证
+- MQTT 3.1.1 下的 `EchoToSender=false` 兼容（当前依赖 MQTT 5.0 User Properties）
 
-## 文档协作
+## 架构概览
 
-- 每次新任务必须先执行“强制启动流程”。
-- 需要判断影响面时，再看 `.codex/documents/02-仓库地图/全仓库代码地图.md`。
-- 中改动和大改动默认在 `.codex/documents/03-历史任务记录/` 留一份说明。
-- 结构变化写回代码地图。
-- 长期经验写回 `lessons.md`。
-- 一次性任务写回历史记录。
-- README 只保留用户视角的概览、运行方式、配置说明和可靠性边界，不要塞入过多实现细节。
-- 详细实现背景、任务过程、踩坑记录和长期规范应沉淀到 `.codex/documents/` 或 `lessons.md`。
+```
+┌─────────────┐     ┌──────────────┐     ┌──────────────────┐
+│ MQTT Client │────▶│ MQTT Broker  │────▶│ IMessageQueue    │
+│  (发布消息)  │     │ (拦截 + 入队) │     │ (有界内存队列)    │
+└─────────────┘     └──────────────┘     └──────────────────┘
+                                                    │
+                                                    ▼
+                                           ┌──────────────────┐
+                                           │ MessageDelivery  │
+                                           │ Service          │
+                                           │ (消费 + 路由     │
+                                           │  + 转发 + 重试)  │
+                                           └──────────────────┘
+                                                    │
+                                                    ▼
+                                           ┌──────────────────┐
+                                           │ IMqttBrokerHost  │
+                                           │ (InjectApplication│
+                                           │  Message 注入)   │
+                                           └──────────────────┘
+                                                    │
+                                                    ▼
+                                           ┌──────────────────┐
+                                           │ MQTT Client      │
+                                           │ (订阅接收)        │
+                                           └──────────────────┘
+```
 
-## 代码 Review 要求
+数据流：
+1. 客户端发布消息 → Broker 拦截（`InterceptingPublishAsync`）→ 消息入队
+2. 投递服务消费队列 → 路由匹配（`MessageRouter.RouteAsync`）→ 向 Topic 注入消息
+3. Broker 按订阅分发给所有匹配客户端
+4. 出站拦截器（`InterceptingOutboundPacketAsync`）阻止回发给发送方（`EchoToSender=false` 时）
 
-做 Review 时，不能只检查能否编译，还要对照需求文档判断实现是否符合运行期目标。
+## 日志
 
-至少检查：
+日志默认输出到：
+- **控制台**（运行时可见）
+- **文件**（`logs/` 目录，按小时滚动，`relay-YYYYMMDD-HH.log`）
 
-1. 是否符合需求文档。
-2. 是否存在不符合仓库结构约定的实现。
-3. 是否存在后台循环空转、固定延迟或无界等待。
-4. 是否存在异常冒泡导致 Host、Broker 或消费者退出的风险。
-5. MQTT 回调是否保持轻量。
-6. 内部队列是否有界，满载策略是否明确。
-7. 消息失败是否可重试、可记录、可进入死信。
-8. 停机时是否尽量优雅排空。
-9. 日志是否能追踪关键消息生命周期。
-10. 测试是否覆盖核心规则和边界情况。
-
-Review 输出应按严重程度组织：
-
-- 必须修改
-- 建议修改
-- 测试缺口
-- 文档缺口
-- 可接受风险
-
-## 完成检查
-
-结束前至少说明四件事：
-
-1. 改了什么
-2. 验证了什么
-3. 没验证什么
-4. 还有什么风险或后续建议
-
-如果是代码任务，还应额外说明：
-
-1. `dotnet build` 是否执行、是否通过
-2. `dotnet test` 是否执行、是否通过
-3. 是否检查过 `RYB.` 残留
-4. 是否需要更新 README、代码地图、历史任务记录或 `lessons.md`
+日志级别可通过 `appsettings.json` 中 `Serilog:MinimumLevel` 调整。

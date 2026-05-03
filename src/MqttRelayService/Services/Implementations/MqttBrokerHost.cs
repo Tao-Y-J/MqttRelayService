@@ -1,4 +1,6 @@
 using System.Buffers;
+using System.Collections.Concurrent;
+using System.Text;
 using Microsoft.Extensions.Options;
 using MQTTnet;
 using MQTTnet.Packets;
@@ -15,12 +17,16 @@ namespace MqttRelayService.Services.Implementations;
 /// </summary>
 public class MqttBrokerHost : IMqttBrokerHost, IDisposable
 {
+    private const string SourceClientIdUserPropertyName = "x-source-client-id";
+    private const string RelayMessageIdUserPropertyName = "x-relay-message-id";
+
     private readonly IAuthService _authService;
     private readonly IClientRegistry _clientRegistry;
     private readonly IMessageQueue _messageQueue;
     private readonly MqttOptions _options;
     private readonly RoutingOptions _routingOptions;
     private readonly ILogger<MqttBrokerHost> _logger;
+    private readonly ConcurrentDictionary<string, byte> _injectedMessageIds = new();
 
     private MqttServer? _mqttServer;
     private bool _disposed;
@@ -135,15 +141,34 @@ public class MqttBrokerHost : IMqttBrokerHost, IDisposable
                 .WithPayload(payload)
                 .WithQualityOfServiceLevel((MqttQualityOfServiceLevel)qos);
 
+            string? relayMessageId = null;
+
             // 如果指定了源客户端 ID，附加到 UserProperties 以便出站拦截器识别
             if (!string.IsNullOrEmpty(sourceClientId))
             {
-                messageBuilder.WithUserProperty("x-source-client-id", sourceClientId);
+                relayMessageId = Guid.NewGuid().ToString("N");
+                _injectedMessageIds.TryAdd(relayMessageId, 0);
+
+                messageBuilder.WithUserProperty(SourceClientIdUserPropertyName, Encoding.UTF8.GetBytes(sourceClientId));
+                messageBuilder.WithUserProperty(RelayMessageIdUserPropertyName, Encoding.UTF8.GetBytes(relayMessageId));
             }
 
             var message = messageBuilder.Build();
             var injectedMessage = new InjectedMqttApplicationMessage(message);
-            await _mqttServer.InjectApplicationMessage(injectedMessage, cancellationToken);
+
+            try
+            {
+                await _mqttServer.InjectApplicationMessage(injectedMessage, cancellationToken);
+            }
+            catch
+            {
+                if (relayMessageId != null)
+                {
+                    _injectedMessageIds.TryRemove(relayMessageId, out _);
+                }
+
+                throw;
+            }
 
             return true;
         }
@@ -194,6 +219,12 @@ public class MqttBrokerHost : IMqttBrokerHost, IDisposable
     {
         try
         {
+            if (IsRelayInjectedMessage(e.ApplicationMessage))
+            {
+                // 服务端注入的转发消息需要继续交给 Broker 分发，避免再次进入内部队列形成循环。
+                return;
+            }
+
             // 更新客户端活动时间
             await _clientRegistry.UpdateActivityAsync(e.ClientId);
 
@@ -280,10 +311,23 @@ public class MqttBrokerHost : IMqttBrokerHost, IDisposable
         if (echoToSender) return false;
 
         var sourceClientId = publishPacket.UserProperties
-            ?.FirstOrDefault(p => p.Name == "x-source-client-id")
-            ?.Value;
+            ?.FirstOrDefault(p => p.Name == SourceClientIdUserPropertyName)
+            ?.ReadValueAsString();
 
         return !string.IsNullOrEmpty(sourceClientId) && sourceClientId == targetClientId;
+    }
+
+    /// <summary>
+    /// 判断消息是否为投递服务通过 Broker 注入的转发消息。
+    /// </summary>
+    private bool IsRelayInjectedMessage(MqttApplicationMessage message)
+    {
+        var relayMessageId = message.UserProperties
+            ?.FirstOrDefault(p => p.Name == RelayMessageIdUserPropertyName)
+            ?.ReadValueAsString();
+
+        return !string.IsNullOrEmpty(relayMessageId)
+            && _injectedMessageIds.TryRemove(relayMessageId, out _);
     }
 
     /// <summary>

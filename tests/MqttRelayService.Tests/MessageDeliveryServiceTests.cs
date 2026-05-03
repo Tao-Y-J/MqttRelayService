@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Moq;
@@ -255,10 +257,291 @@ public class MessageDeliveryServiceTests
         Assert.Equal("client-1", recordingBroker.LastSourceClientId);
     }
 
+    #region 取消语义测试
+
+    [Fact]
+    public async Task ProcessMessageAsync_CancelledToken_RethrowsOperationCanceledException()
+    {
+        var message = CreateTestMessage();
+        var targets = new List<ForwardResult>
+        {
+            new() { TargetClientId = "client-2", Success = true }
+        };
+
+        _routerMock.Setup(r => r.RouteAsync(It.IsAny<RouteContext>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(targets);
+        _brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+
+        var method = typeof(MessageDeliveryService).GetMethod("ProcessMessageAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        var cancelledToken = new CancellationToken(canceled: true);
+
+        await Assert.ThrowsAsync<OperationCanceledException>(async () =>
+            await (Task)method!.Invoke(_service, new object[] { message, cancelledToken })!);
+
+        Assert.Equal(0, message.RetryCount);
+        _queueMock.Verify(q => q.EnqueueAsync(It.IsAny<ForwardMessage>(), It.IsAny<CancellationToken>()), Times.Never);
+        _deadLetterMock.Verify(d => d.WriteAsync(It.IsAny<DeadLetterRecord>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task TryForwardAsync_CancelledToken_RethrowsOperationCanceledException()
+    {
+        _brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+
+        var method = typeof(MessageDeliveryService).GetMethod("TryForwardAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        var cancelledToken = new CancellationToken(canceled: true);
+
+        await Assert.ThrowsAsync<OperationCanceledException>(async () =>
+            await (Task<bool>)method!.Invoke(_service, new object[] { CreateTestMessage().RouteContext, cancelledToken })!);
+    }
+
+    [Fact]
+    public async Task HandleFailureAsync_CancelledToken_DoesNotIncrementRetryCount()
+    {
+        var message = CreateTestMessage();
+        var delay = TimeSpan.FromMilliseconds(100);
+
+        _retryPolicyMock.Setup(rp => rp.GetDelayAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(delay);
+
+        var method = typeof(MessageDeliveryService).GetMethod("HandleFailureAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        var cancelledToken = new CancellationToken(canceled: true);
+
+        await Assert.ThrowsAsync<OperationCanceledException>(async () =>
+            await (Task)method!.Invoke(_service, new object[] { message, "test failure", cancelledToken })!);
+
+        Assert.Equal(0, message.RetryCount);
+        _queueMock.Verify(q => q.EnqueueAsync(It.IsAny<ForwardMessage>(), It.IsAny<CancellationToken>()), Times.Never);
+        _deadLetterMock.Verify(d => d.WriteAsync(It.IsAny<DeadLetterRecord>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task HandleFailureAsync_CancelledDuringDelay_RethrowsOperationCanceledException()
+    {
+        var message = CreateTestMessage();
+        var delay = TimeSpan.FromMilliseconds(500);
+
+        _retryPolicyMock.Setup(rp => rp.GetDelayAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(delay);
+
+        var method = typeof(MessageDeliveryService).GetMethod("HandleFailureAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+        using var cts = new CancellationTokenSource();
+        var token = cts.Token;
+
+        // 在调用后 50ms 取消 token
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(50);
+            cts.Cancel();
+        });
+
+        await Assert.ThrowsAsync<OperationCanceledException>(async () =>
+            await (Task)method!.Invoke(_service, new object[] { message, "test failure", token })!);
+
+        Assert.Equal(0, message.RetryCount);
+        _queueMock.Verify(q => q.EnqueueAsync(It.IsAny<ForwardMessage>(), It.IsAny<CancellationToken>()), Times.Never);
+        _deadLetterMock.Verify(d => d.WriteAsync(It.IsAny<DeadLetterRecord>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    #endregion
+
+    #region Drain 超时测试
+
+    [Fact]
+    public async Task StopAsync_DrainTimeout_LogsRemainingCount()
+    {
+        var message = CreateTestMessage();
+        var queueMock = new Mock<IMessageQueue>();
+        var routerMock = new Mock<IMessageRouter>();
+        var brokerHost = new RecordingBrokerHost();
+        var logMessages = new List<string>();
+        var loggerMock = new Mock<ILogger<MessageDeliveryService>>();
+
+        loggerMock.Setup(x => x.Log(
+            It.IsAny<LogLevel>(),
+            It.IsAny<EventId>(),
+            It.Is<It.IsAnyType>((o, t) => true),
+            It.IsAny<Exception?>(),
+            It.IsAny<Func<It.IsAnyType, Exception?, string>>()))
+            .Callback(new InvocationAction(i =>
+            {
+                var formatter = i.Arguments[4] as Delegate;
+                var msg = formatter?.DynamicInvoke(i.Arguments[2], i.Arguments[3])?.ToString();
+                if (msg != null) logMessages.Add(msg);
+            }));
+
+        queueMock.Setup(q => q.ReadAllAsync(It.IsAny<CancellationToken>()))
+            .Returns(GetEmptyAsyncEnumerable());
+
+        queueMock.SetupSequence(q => q.TryDequeueAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(message)
+            .ReturnsAsync((ForwardMessage?)null);
+
+        queueMock.SetupGet(q => q.Count).Returns(1);
+
+        routerMock.Setup(r => r.RouteAsync(It.IsAny<RouteContext>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new List<ForwardResult> { new() { TargetClientId = "client-2" } });
+
+        var service = new MessageDeliveryService(
+            queueMock.Object,
+            routerMock.Object,
+            brokerHost,
+            new Mock<IDeadLetterService>().Object,
+            new Mock<IRetryPolicyProvider>().Object,
+            Microsoft.Extensions.Options.Options.Create(new ReliabilityOptions
+            {
+                QueueCapacity = 10,
+                MaxRetryCount = 3,
+                RetryBaseDelayMs = 10,
+                RetryMaxDelayMs = 100,
+                ForwardTimeoutMs = 5000,
+                ShutdownDrainTimeoutMs = 2000,
+                DropWhenQueueFull = false
+            }),
+            loggerMock.Object);
+
+        await service.StartAsync(CancellationToken.None);
+        await Task.Delay(200);
+        await service.StopAsync(CancellationToken.None);
+
+        // 验证警告日志中包含 "已排空" 和 "剩余"
+        var warningLog = logMessages.FirstOrDefault(m => m.Contains("已排空") && m.Contains("剩余"));
+        Assert.NotNull(warningLog);
+    }
+
+    #endregion
+
+    #region 并发消费者测试
+
+    [Fact]
+    public async Task StartAsync_MaxConcurrentHandlers3_StartsThreeConsumers()
+    {
+        var queueMock = new Mock<IMessageQueue>();
+        var routerMock = new Mock<IMessageRouter>();
+        var brokerHost = new RecordingBrokerHost();
+
+        var channel = Channel.CreateUnbounded<ForwardMessage>();
+        queueMock.Setup(q => q.ReadAllAsync(It.IsAny<CancellationToken>()))
+            .Returns(channel.Reader.ReadAllAsync());
+
+        var startTimes = new ConcurrentBag<long>();
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+        routerMock.Setup(r => r.RouteAsync(It.IsAny<RouteContext>(), It.IsAny<CancellationToken>()))
+            .Returns(async (RouteContext ctx, CancellationToken ct) =>
+            {
+                startTimes.Add(stopwatch.ElapsedMilliseconds);
+                await Task.Delay(30, ct);
+                return new List<ForwardResult> { new() { TargetClientId = "client-2", Success = true } };
+            });
+
+        var service = new MessageDeliveryService(
+            queueMock.Object,
+            routerMock.Object,
+            brokerHost,
+            new Mock<IDeadLetterService>().Object,
+            new Mock<IRetryPolicyProvider>().Object,
+            Microsoft.Extensions.Options.Options.Create(new ReliabilityOptions
+            {
+                QueueCapacity = 10,
+                MaxRetryCount = 3,
+                RetryBaseDelayMs = 10,
+                RetryMaxDelayMs = 100,
+                ForwardTimeoutMs = 5000,
+                ShutdownDrainTimeoutMs = 2000,
+                DropWhenQueueFull = false,
+                MaxConcurrentHandlers = 3
+            }),
+            new Mock<ILogger<MessageDeliveryService>>().Object);
+
+        await service.StartAsync(CancellationToken.None);
+        await Task.Delay(100);
+
+        channel.Writer.TryWrite(CreateTestMessage());
+        channel.Writer.TryWrite(CreateTestMessage());
+        channel.Writer.TryWrite(CreateTestMessage());
+        channel.Writer.Complete();
+
+        await Task.Delay(200);
+        await service.StopAsync(CancellationToken.None);
+
+        var times = startTimes.ToArray();
+        Assert.True(times.Length >= 3, $"期望处理 3 条消息，实际处理了 {times.Length} 条");
+
+        var maxDiff = times.Max() - times.Min();
+        Assert.True(maxDiff < 50, $"期望 3 条消息并发开始处理，实际最大时间差 {maxDiff}ms");
+    }
+
+    [Fact]
+    public async Task StartAsync_MaxConcurrentHandlers0_FallsBackToOne()
+    {
+        var queueMock = new Mock<IMessageQueue>();
+        var routerMock = new Mock<IMessageRouter>();
+        var brokerHost = new RecordingBrokerHost();
+
+        var channel = Channel.CreateUnbounded<ForwardMessage>();
+        queueMock.Setup(q => q.ReadAllAsync(It.IsAny<CancellationToken>()))
+            .Returns(channel.Reader.ReadAllAsync());
+
+        var startTimes = new ConcurrentBag<long>();
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+        routerMock.Setup(r => r.RouteAsync(It.IsAny<RouteContext>(), It.IsAny<CancellationToken>()))
+            .Returns(async (RouteContext ctx, CancellationToken ct) =>
+            {
+                startTimes.Add(stopwatch.ElapsedMilliseconds);
+                await Task.Delay(30, ct);
+                return new List<ForwardResult> { new() { TargetClientId = "client-2", Success = true } };
+            });
+
+        var service = new MessageDeliveryService(
+            queueMock.Object,
+            routerMock.Object,
+            brokerHost,
+            new Mock<IDeadLetterService>().Object,
+            new Mock<IRetryPolicyProvider>().Object,
+            Microsoft.Extensions.Options.Options.Create(new ReliabilityOptions
+            {
+                QueueCapacity = 10,
+                MaxRetryCount = 3,
+                RetryBaseDelayMs = 10,
+                RetryMaxDelayMs = 100,
+                ForwardTimeoutMs = 5000,
+                ShutdownDrainTimeoutMs = 2000,
+                DropWhenQueueFull = false,
+                MaxConcurrentHandlers = 0
+            }),
+            new Mock<ILogger<MessageDeliveryService>>().Object);
+
+        await service.StartAsync(CancellationToken.None);
+        await Task.Delay(100);
+
+        channel.Writer.TryWrite(CreateTestMessage());
+        channel.Writer.TryWrite(CreateTestMessage());
+        channel.Writer.TryWrite(CreateTestMessage());
+        channel.Writer.Complete();
+
+        await Task.Delay(200);
+        await service.StopAsync(CancellationToken.None);
+
+        var times = startTimes.ToArray();
+        Assert.True(times.Length >= 3, $"期望处理 3 条消息，实际处理了 {times.Length} 条");
+
+        // MaxConcurrentHandlers=0 时应回退到单消费者，顺序处理时间差应 >= 50ms
+        var maxDiff = times.Max() - times.Min();
+        Assert.True(maxDiff >= 50, $"期望单消费者顺序处理，实际最大时间差 {maxDiff}ms");
+    }
+
+    #endregion
+
     private class RecordingBrokerHost : IMqttBrokerHost
     {
         public bool PublishCalled { get; private set; }
         public string? LastSourceClientId { get; private set; }
+        public int PublishCallCount { get; private set; }
 
         public bool IsRunning => true;
 
@@ -268,6 +551,7 @@ public class MessageDeliveryServiceTests
         public Task<bool> PublishAsync(string topic, byte[] payload, int qos, string? sourceClientId = null, CancellationToken cancellationToken = default)
         {
             PublishCalled = true;
+            PublishCallCount++;
             LastSourceClientId = sourceClientId;
             return Task.FromResult(true);
         }

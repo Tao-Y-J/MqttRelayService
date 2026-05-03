@@ -19,7 +19,7 @@ public class MessageDeliveryService : IMessageDeliveryService
     private readonly ReliabilityOptions _options;
     private readonly ILogger<MessageDeliveryService> _logger;
 
-    private Task? _consumerTask;
+    private readonly List<Task> _consumerTasks = new();
     private CancellationTokenSource? _cts;
 
     public MessageDeliveryService(
@@ -46,9 +46,14 @@ public class MessageDeliveryService : IMessageDeliveryService
     public Task StartAsync(CancellationToken cancellationToken = default)
     {
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        _consumerTask = Task.Run(() => ConsumeLoopAsync(_cts.Token), _cts.Token);
+        var handlerCount = Math.Max(1, _options.MaxConcurrentHandlers);
 
-        _logger.LogInformation("消息投递服务已启动");
+        for (int i = 0; i < handlerCount; i++)
+        {
+            _consumerTasks.Add(Task.Run(() => ConsumeLoopAsync(_cts.Token), _cts.Token));
+        }
+
+        _logger.LogInformation("消息投递服务已启动，消费者数量 {HandlerCount}", handlerCount);
         return Task.CompletedTask;
     }
 
@@ -59,7 +64,7 @@ public class MessageDeliveryService : IMessageDeliveryService
     {
         _logger.LogInformation("消息投递服务正在停止...");
 
-        if (_consumerTask == null)
+        if (_consumerTasks.Count == 0)
         {
             return;
         }
@@ -69,8 +74,9 @@ public class MessageDeliveryService : IMessageDeliveryService
             // 阶段 1：取消消费循环的 ReadAllAsync，停止接收新消息
             _cts?.Cancel();
 
-            // 给消费循环一点时间响应取消
-            await Task.WhenAny(_consumerTask, Task.Delay(1000, cancellationToken));
+            // 等待所有消费者退出
+            var allConsumersTask = Task.WhenAll(_consumerTasks);
+            await Task.WhenAny(allConsumersTask, Task.Delay(2000, cancellationToken));
 
             // 阶段 2：排空队列中剩余的消息
             var drainTimeout = TimeSpan.FromMilliseconds(_options.ShutdownDrainTimeoutMs);
@@ -79,7 +85,16 @@ public class MessageDeliveryService : IMessageDeliveryService
             var drainedCount = 0;
             while (!drainCts.Token.IsCancellationRequested)
             {
-                var message = await _queue.TryDequeueAsync(drainCts.Token);
+                ForwardMessage? message;
+                try
+                {
+                    message = await _queue.TryDequeueAsync(drainCts.Token);
+                }
+                catch (OperationCanceledException) when (drainCts.Token.IsCancellationRequested)
+                {
+                    break; // drain 超时
+                }
+
                 if (message == null)
                 {
                     break; // 队列为空，排空完成
@@ -89,6 +104,12 @@ public class MessageDeliveryService : IMessageDeliveryService
                 {
                     await ProcessMessageAsync(message, drainCts.Token);
                     drainedCount++;
+                }
+                catch (OperationCanceledException) when (drainCts.Token.IsCancellationRequested)
+                {
+                    // drain 超时取消，停止排空
+                    _logger.LogWarning("排空阶段因超时取消，已排空 {DrainedCount} 条消息", drainedCount);
+                    break;
                 }
                 catch (Exception ex)
                 {
@@ -100,12 +121,12 @@ public class MessageDeliveryService : IMessageDeliveryService
             var remainingCount = _queue.Count;
             if (remainingCount > 0)
             {
-                _logger.LogWarning("投递服务停止超时，已排空 {DrainedCount} 条消息，剩余 {RemainingCount} 条未处理",
+                _logger.LogWarning("投递服务停止，已排空 {DrainedCount} 条消息，剩余 {RemainingCount} 条未处理",
                     drainedCount, remainingCount);
             }
             else
             {
-                _logger.LogInformation("投递服务已停止，排空 {DrainedCount} 条消息", drainedCount);
+                _logger.LogInformation("投递服务已停止，排空 {DrainedCount} 条消息，剩余 0 条", drainedCount);
             }
         }
         catch (Exception ex)
@@ -150,6 +171,8 @@ public class MessageDeliveryService : IMessageDeliveryService
     /// </summary>
     private async Task ProcessMessageAsync(ForwardMessage message, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+
         var context = message.RouteContext;
 
         try
@@ -184,6 +207,11 @@ public class MessageDeliveryService : IMessageDeliveryService
                 await HandleFailureAsync(message, "消息注入失败", cancellationToken);
             }
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // 正常取消，向上传播，不视为业务失败
+            throw;
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "处理消息 {MessageId} 时发生异常", context.MessageId);
@@ -196,6 +224,8 @@ public class MessageDeliveryService : IMessageDeliveryService
     /// </summary>
     private async Task<bool> TryForwardAsync(RouteContext context, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+
         try
         {
             using var timeoutCts = new CancellationTokenSource(_options.ForwardTimeoutMs);
@@ -221,6 +251,11 @@ public class MessageDeliveryService : IMessageDeliveryService
 
             return success;
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // 主机取消信号，重新抛出，不触发重试
+            throw;
+        }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             _logger.LogWarning("消息 {MessageId} 注入 Topic {Topic} 超时",
@@ -240,6 +275,13 @@ public class MessageDeliveryService : IMessageDeliveryService
     /// </summary>
     private async Task HandleFailureAsync(ForwardMessage message, string reason, CancellationToken cancellationToken)
     {
+        // 取消时不增加业务失败语义，不入队，不写死信
+        if (cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogInformation("消息 {MessageId} 因取消而停止重试处理", message.RouteContext.MessageId);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
         message.RetryCount++;
 
         if (message.RetryCount <= _options.MaxRetryCount)
@@ -251,8 +293,17 @@ public class MessageDeliveryService : IMessageDeliveryService
             _logger.LogWarning("消息 {MessageId} 第 {RetryCount} 次转发失败，{DelayMs}ms 后重试，原因：{Reason}",
                 message.RouteContext.MessageId, message.RetryCount, delay.TotalMilliseconds, reason);
 
-            // 等待退避延迟（当前单线程消费者，阻塞是可接受的简化方案）
-            await Task.Delay(delay, cancellationToken);
+            // 等待退避延迟（当前多消费者场景，单个消费者阻塞不影响其他消费者）
+            try
+            {
+                await Task.Delay(delay, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // 取消时不增加重试计数，重新抛出
+                message.RetryCount--;
+                throw new OperationCanceledException(cancellationToken);
+            }
 
             // 重新入队等待重试
             var enqueued = await _queue.EnqueueAsync(message, cancellationToken);
