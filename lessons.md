@@ -104,3 +104,25 @@ powershell -ExecutionPolicy Bypass -NoProfile -Command "& '%~dp0install-service.
 **解决（第一版）**：在 `HandleFailureAsync` 中 `await Task.Delay(delay)` 后再入队。当前单消费者场景下可接受。
 
 **更优方案（待后续任务）**：引入独立延迟队列，消费者从延迟队列读取已到期的消息，避免阻塞主消费者。
+
+### 6.4 EchoToSender 必须在 Broker 分发层拦截
+
+**现象**：仅在 `MessageRouter.RouteAsync` 中过滤发送方无法阻止 Broker 将消息分发给发送方自己。`InjectApplicationMessage` 是按 Topic 广播，Broker 不知道谁是"原始发送方"。
+
+**解决**：
+- 在注入消息时通过 MQTT 5.0 `UserProperties` 附加 `x-source-client-id`
+- 注册 `InterceptingOutboundPacketAsync` 出站拦截器
+- 在分发阶段检查目标 `ClientId` 是否等于 `x-source-client-id`，如果是则 `ProcessPacket = false`
+
+**注意**：此方案依赖 MQTT 5.0 User Properties。如果降级到 MQTT 3.1.1，需要使用 Payload 或 Topic 携带标记。
+
+### 6.5 停机排空需要两阶段设计
+
+**现象**：直接取消 `_cts` 会导致 `ReadAllAsync` 立即退出，队列中剩余消息不会被处理。
+
+**解决**：
+- 阶段 1：取消 `_cts`，让 `ReadAllAsync` 退出消费循环
+- 阶段 2：使用 `TryDequeueAsync`（非阻塞）循环消费队列剩余消息，直到超时或队列为空
+- 最后记录排空数量和剩余数量
+
+**注意**：`TryDequeueAsync` 必须使用非阻塞实现（`ChannelReader.TryRead`），否则 drain 阶段会卡死。

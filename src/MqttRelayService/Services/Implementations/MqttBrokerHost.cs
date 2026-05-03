@@ -1,6 +1,7 @@
 using System.Buffers;
 using Microsoft.Extensions.Options;
 using MQTTnet;
+using MQTTnet.Packets;
 using MQTTnet.Protocol;
 using MQTTnet.Server;
 using MqttRelayService.Models;
@@ -18,6 +19,7 @@ public class MqttBrokerHost : IMqttBrokerHost, IDisposable
     private readonly IClientRegistry _clientRegistry;
     private readonly IMessageQueue _messageQueue;
     private readonly MqttOptions _options;
+    private readonly RoutingOptions _routingOptions;
     private readonly ILogger<MqttBrokerHost> _logger;
 
     private MqttServer? _mqttServer;
@@ -28,12 +30,14 @@ public class MqttBrokerHost : IMqttBrokerHost, IDisposable
         IClientRegistry clientRegistry,
         IMessageQueue messageQueue,
         IOptions<MqttOptions> options,
+        IOptions<RoutingOptions> routingOptions,
         ILogger<MqttBrokerHost> logger)
     {
         _authService = authService;
         _clientRegistry = clientRegistry;
         _messageQueue = messageQueue;
         _options = options.Value;
+        _routingOptions = routingOptions.Value;
         _logger = logger;
     }
 
@@ -68,6 +72,7 @@ public class MqttBrokerHost : IMqttBrokerHost, IDisposable
             _mqttServer.InterceptingPublishAsync += OnInterceptingPublishAsync;
             _mqttServer.InterceptingSubscriptionAsync += OnInterceptingSubscriptionAsync;
             _mqttServer.InterceptingUnsubscriptionAsync += OnInterceptingUnsubscriptionAsync;
+            _mqttServer.InterceptingOutboundPacketAsync += OnInterceptingOutboundPacketAsync;
             _mqttServer.ClientConnectedAsync += OnClientConnectedAsync;
             _mqttServer.ClientDisconnectedAsync += OnClientDisconnectedAsync;
 
@@ -99,6 +104,7 @@ public class MqttBrokerHost : IMqttBrokerHost, IDisposable
             _mqttServer.InterceptingPublishAsync -= OnInterceptingPublishAsync;
             _mqttServer.InterceptingSubscriptionAsync -= OnInterceptingSubscriptionAsync;
             _mqttServer.InterceptingUnsubscriptionAsync -= OnInterceptingUnsubscriptionAsync;
+            _mqttServer.InterceptingOutboundPacketAsync -= OnInterceptingOutboundPacketAsync;
             _mqttServer.ClientConnectedAsync -= OnClientConnectedAsync;
             _mqttServer.ClientDisconnectedAsync -= OnClientDisconnectedAsync;
 
@@ -112,9 +118,9 @@ public class MqttBrokerHost : IMqttBrokerHost, IDisposable
     }
 
     /// <summary>
-    /// 向指定 Topic 注入应用消息
+    /// 向指定 Topic 注入应用消息，由 Broker 自动分发给匹配的订阅者
     /// </summary>
-    public async Task<bool> PublishAsync(string topic, byte[] payload, int qos, CancellationToken cancellationToken = default)
+    public async Task<bool> PublishAsync(string topic, byte[] payload, int qos, string? sourceClientId = null, CancellationToken cancellationToken = default)
     {
         if (_mqttServer == null || !_mqttServer.IsStarted)
         {
@@ -124,12 +130,18 @@ public class MqttBrokerHost : IMqttBrokerHost, IDisposable
 
         try
         {
-            var message = new MqttApplicationMessageBuilder()
+            var messageBuilder = new MqttApplicationMessageBuilder()
                 .WithTopic(topic)
                 .WithPayload(payload)
-                .WithQualityOfServiceLevel((MqttQualityOfServiceLevel)qos)
-                .Build();
+                .WithQualityOfServiceLevel((MqttQualityOfServiceLevel)qos);
 
+            // 如果指定了源客户端 ID，附加到 UserProperties 以便出站拦截器识别
+            if (!string.IsNullOrEmpty(sourceClientId))
+            {
+                messageBuilder.WithUserProperty("x-source-client-id", sourceClientId);
+            }
+
+            var message = messageBuilder.Build();
             var injectedMessage = new InjectedMqttApplicationMessage(message);
             await _mqttServer.InjectApplicationMessage(injectedMessage, cancellationToken);
 
@@ -243,6 +255,35 @@ public class MqttBrokerHost : IMqttBrokerHost, IDisposable
         {
             _logger.LogError(ex, "处理客户端 {ClientId} 订阅时发生异常", e.ClientId);
         }
+    }
+
+    /// <summary>
+    /// 出站数据包拦截：EchoToSender=false 时阻止消息回发给发送方自身
+    /// </summary>
+    private Task OnInterceptingOutboundPacketAsync(InterceptingPacketEventArgs e)
+    {
+        if (e.Packet is MqttPublishPacket publishPacket
+            && ShouldBlockEchoToSender(_routingOptions.EchoToSender, e.ClientId, publishPacket))
+        {
+            e.ProcessPacket = false;
+            _logger.LogDebug("阻止消息回发给发送方 {ClientId}，Topic={Topic}", e.ClientId, publishPacket.Topic);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// 判断是否应该阻止消息回发给发送方
+    /// </summary>
+    internal static bool ShouldBlockEchoToSender(bool echoToSender, string targetClientId, MqttPublishPacket publishPacket)
+    {
+        if (echoToSender) return false;
+
+        var sourceClientId = publishPacket.UserProperties
+            ?.FirstOrDefault(p => p.Name == "x-source-client-id")
+            ?.Value;
+
+        return !string.IsNullOrEmpty(sourceClientId) && sourceClientId == targetClientId;
     }
 
     /// <summary>

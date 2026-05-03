@@ -53,37 +53,64 @@ public class MessageDeliveryService : IMessageDeliveryService
     }
 
     /// <summary>
-    /// 停止投递服务
+    /// 停止投递服务，先取消消费循环，再在超时内尽量排空队列中剩余消息
     /// </summary>
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
         _logger.LogInformation("消息投递服务正在停止...");
 
-        _cts?.Cancel();
-
-        if (_consumerTask != null)
+        if (_consumerTask == null)
         {
-            try
+            return;
+        }
+
+        try
+        {
+            // 阶段 1：取消消费循环的 ReadAllAsync，停止接收新消息
+            _cts?.Cancel();
+
+            // 给消费循环一点时间响应取消
+            await Task.WhenAny(_consumerTask, Task.Delay(1000, cancellationToken));
+
+            // 阶段 2：排空队列中剩余的消息
+            var drainTimeout = TimeSpan.FromMilliseconds(_options.ShutdownDrainTimeoutMs);
+            using var drainCts = new CancellationTokenSource(drainTimeout);
+
+            var drainedCount = 0;
+            while (!drainCts.Token.IsCancellationRequested)
             {
-                var drainTimeout = TimeSpan.FromMilliseconds(_options.ShutdownDrainTimeoutMs);
-                using var timeoutCts = new CancellationTokenSource(drainTimeout);
-
-                // 等待消费循环结束或超时
-                await Task.WhenAny(_consumerTask, Task.Delay(drainTimeout, cancellationToken));
-
-                if (!_consumerTask.IsCompleted)
+                var message = await _queue.TryDequeueAsync(drainCts.Token);
+                if (message == null)
                 {
-                    _logger.LogWarning("投递服务停止超时，剩余未处理消息可能丢失");
+                    break; // 队列为空，排空完成
                 }
-                else
+
+                try
                 {
-                    _logger.LogInformation("投递服务已停止");
+                    await ProcessMessageAsync(message, drainCts.Token);
+                    drainedCount++;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "排空阶段处理消息 {MessageId} 时发生异常",
+                        message.RouteContext.MessageId);
                 }
             }
-            catch (Exception ex)
+
+            var remainingCount = _queue.Count;
+            if (remainingCount > 0)
             {
-                _logger.LogError(ex, "停止投递服务时发生异常");
+                _logger.LogWarning("投递服务停止超时，已排空 {DrainedCount} 条消息，剩余 {RemainingCount} 条未处理",
+                    drainedCount, remainingCount);
             }
+            else
+            {
+                _logger.LogInformation("投递服务已停止，排空 {DrainedCount} 条消息", drainedCount);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "停止投递服务时发生异常");
         }
     }
 
@@ -178,6 +205,7 @@ public class MessageDeliveryService : IMessageDeliveryService
                 context.Topic,
                 context.Payload,
                 context.QoS,
+                context.SourceClientId,
                 linkedCts.Token);
 
             if (success)

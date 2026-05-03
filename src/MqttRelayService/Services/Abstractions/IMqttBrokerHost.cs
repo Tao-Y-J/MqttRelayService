@@ -23,5 +23,10 @@ public interface IMqttBrokerHost
     /// <summary>
     /// 向指定 Topic 注入应用消息，由 Broker 自动分发给匹配的订阅者
     /// </summary>
-    Task<bool> PublishAsync(string topic, byte[] payload, int qos, CancellationToken cancellationToken = default);
+    /// <param name="topic">目标主题</param>
+    /// <param name="payload">消息负载</param>
+    /// <param name="qos">QoS 等级</param>
+    /// <param name="sourceClientId">源客户端 ID（用于 EchoToSender=false 时阻止回发）</param>
+    /// <param name="cancellationToken">取消令牌</param>
+    Task<bool> PublishAsync(string topic, byte[] payload, int qos, string? sourceClientId = null, CancellationToken cancellationToken = default);
 }

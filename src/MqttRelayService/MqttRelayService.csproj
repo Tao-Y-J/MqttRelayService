@@ -12,6 +12,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="MqttRelayService.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="MQTTnet" Version="5.1.0.1559" />
     <PackageReference Include="MQTTnet.Server" Version="5.1.0.1559" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
