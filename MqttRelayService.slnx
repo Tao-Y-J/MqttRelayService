@@ -1,8 +1,16 @@
 <Solution>
+  <Configurations>
+    <Platform Name="Any CPU" />
+    <Platform Name="x64" />
+  </Configurations>
   <Folder Name="/src/">
-    <Project Path="src/MqttRelayService/MqttRelayService.csproj" />
+    <Project Path="src/MqttRelayService/MqttRelayService.csproj">
+      <Platform Solution="*|x64" Project="x64" />
+    </Project>
   </Folder>
   <Folder Name="/tests/">
-    <Project Path="tests/MqttRelayService.Tests/MqttRelayService.Tests.csproj" />
+    <Project Path="tests/MqttRelayService.Tests/MqttRelayService.Tests.csproj">
+      <Platform Solution="*|x64" Project="x64" />
+    </Project>
   </Folder>
 </Solution>

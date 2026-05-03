@@ -31,4 +31,9 @@ public interface IMessageQueue
     /// 尝试从队列取出消息
     /// </summary>
     Task<ForwardMessage?> TryDequeueAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 异步读取队列中所有消息（挂起等待，非轮询）
+    /// </summary>
+    IAsyncEnumerable<ForwardMessage> ReadAllAsync(CancellationToken cancellationToken = default);
 }
