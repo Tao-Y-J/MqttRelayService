@@ -1,27 +1,36 @@
-# 长期经验记录
+﻿# 长期经验记录
 
 本文档记录跨任务的长期经验、踩坑记录和设计决策，供后续会话参考。
 
-## 1. Windows 脚本编码（已踩坑）
+## 1. Windows 与中文文本编码（已踩坑）
 
-这是本项目脚本开发的最大坑点，必须严格遵守：
+这是本项目脚本和中文文档维护的最大坑点，必须严格遵守：
 
-### 1.1 编码对照表
+### 1.1 默认编码基线
+
+- 仓库内所有文本文件的读写默认使用 `UTF-8 with BOM`。
+- 当前唯一已确认的例外是 `.cmd` / `.bat`，必须保持 `GBK (936)`。
+- 只要新增、批量改写或修复中文文本文件，就先确认编码，再检查可读性。
+
+### 1.2 编码对照表
 
 | 文件类型 | 必须编码 | 代码页设置 | 原因 |
 |----------|----------|-----------|------|
+| 其他文本文件（含 `.ps1`、`.md`、`.json`、`.yml`、`.xml`、`.cs`） | **UTF-8 with BOM** | 无需设置 | 仓库长期以中文文本为主，Windows / PowerShell 5.1 读取无 BOM 的 UTF-8 文件时容易按系统编码（GBK）解码，导致乱码 |
 | `.cmd` / `.bat` | **GBK (936)** | `chcp 936` | Windows cmd 默认用 GBK 解码脚本文件，UTF-8 会导致中文被拆成多个字符，进而被解析为命令名，产生`'XX' 不是内部或外部命令` 错误 |
-| `.ps1` | **UTF-8 with BOM** | 无需设置 | PowerShell 5.1 读取脚本时，有 BOM 则按 UTF-8 解码，无 BOM 则按系统编码（GBK）解码，导致中文乱码 |
 
-### 1.2 常见错误现象
+### 1.3 常见错误现象
 
 - **cmd 乱码**：`chcp 65001` 后仍然乱码，因为 cmd 文件本身是 UTF-8 编码，但 cmd 解析器在某些 Windows 版本上对 UTF-8 支持不完整
 - **cmd 命令解析错误**：中文字符被拆成多个字节，每个字节被当作一个命令名执行，出现 `']' 不是内部或外部命令`
 - **ps1 乱码**：脚本中的中文注释和字符串显示为乱码，因为 PS 5.1 用 GBK 解码了 UTF-8 字节
 
-### 1.3 正确的文件写入方式
+### 1.4 正确的文件写入方式
 
 ```powershell
+# 其他文本文件 - 使用 UTF-8 with BOM
+[System.IO.File]::WriteAllText("file.md", $content, [System.Text.Encoding]::UTF8)
+
 # .cmd 文件 - 使用 GBK 编码
 $encoding = [System.Text.Encoding]::GetEncoding(936)
 [System.IO.File]::WriteAllText("file.cmd", $content, $encoding)
@@ -31,7 +40,7 @@ $encoding = [System.Text.Encoding]::GetEncoding(936)
 # 注意：[System.Text.Encoding]::UTF8 默认会写入 BOM
 ```
 
-### 1.4 脚本执行方式
+### 1.5 脚本执行方式
 
 **错误方式**（弹出新窗口，执行完立即关闭，用户看不到输出）：
 ```cmd

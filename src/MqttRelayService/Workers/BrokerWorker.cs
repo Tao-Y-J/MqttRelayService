@@ -10,15 +10,24 @@ public class BrokerWorker : BackgroundService
     private readonly IMqttBrokerHost _brokerHost;
     private readonly IHostApplicationLifetime _applicationLifetime;
     private readonly ILogger<BrokerWorker> _logger;
+    private readonly TimeSpan _healthCheckInterval;
+    private readonly TimeSpan _restartDelay;
+    private readonly int _maxConsecutiveFailures;
 
     public BrokerWorker(
         IMqttBrokerHost brokerHost,
         IHostApplicationLifetime applicationLifetime,
-        ILogger<BrokerWorker> logger)
+        ILogger<BrokerWorker> logger,
+        TimeSpan? healthCheckInterval = null,
+        TimeSpan? restartDelay = null,
+        int maxConsecutiveFailures = 10)
     {
         _brokerHost = brokerHost;
         _applicationLifetime = applicationLifetime;
         _logger = logger;
+        _healthCheckInterval = healthCheckInterval ?? TimeSpan.FromSeconds(5);
+        _restartDelay = restartDelay ?? TimeSpan.FromSeconds(5);
+        _maxConsecutiveFailures = Math.Max(1, maxConsecutiveFailures);
     }
 
     /// <summary>
@@ -40,23 +49,22 @@ public class BrokerWorker : BackgroundService
         }
 
         // 监控循环：检查 Broker 状态，异常停止时自动重启
-        var restartDelay = TimeSpan.FromSeconds(5);
         var consecutiveFailures = 0;
-        const int maxConsecutiveFailures = 10;
 
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+                await Task.Delay(_healthCheckInterval, stoppingToken);
 
                 if (!_brokerHost.IsRunning)
                 {
                     consecutiveFailures++;
 
-                    if (consecutiveFailures > maxConsecutiveFailures)
+                    if (consecutiveFailures > _maxConsecutiveFailures)
                     {
-                        _logger.LogError("Broker 连续重启失败 {Count} 次，停止重试", consecutiveFailures);
+                        _logger.LogError("Broker 连续重启失败 {Count} 次，停止服务", consecutiveFailures);
+                        _applicationLifetime.StopApplication();
                         break;
                     }
 
@@ -70,8 +78,8 @@ public class BrokerWorker : BackgroundService
                     }
                     catch (Exception restartEx)
                     {
-                        _logger.LogError(restartEx, "Broker 重启失败，{Delay}s 后再次尝试", restartDelay.TotalSeconds);
-                        await Task.Delay(restartDelay, stoppingToken);
+                        _logger.LogError(restartEx, "Broker 重启失败，{Delay}s 后再次尝试", _restartDelay.TotalSeconds);
+                        await Task.Delay(_restartDelay, stoppingToken);
                     }
                 }
             }

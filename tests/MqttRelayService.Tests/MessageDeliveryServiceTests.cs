@@ -257,6 +257,78 @@ public class MessageDeliveryServiceTests
         Assert.Equal("client-1", recordingBroker.LastSourceClientId);
     }
 
+    [Fact]
+    public async Task StopAsync_CancelledInFlightMessage_ReEnqueuesAndDrains()
+    {
+        var message = CreateTestMessage();
+        var queue = new InMemoryMessageQueue(
+            Microsoft.Extensions.Options.Options.Create(new ReliabilityOptions
+            {
+                QueueCapacity = 10,
+                EnqueueTimeoutMs = 1000,
+                MaxRetryCount = 3,
+                RetryBaseDelayMs = 10,
+                RetryMaxDelayMs = 100,
+                ForwardTimeoutMs = 5000,
+                ShutdownDrainTimeoutMs = 2000,
+                DropWhenQueueFull = false,
+                MaxConcurrentHandlers = 1
+            }),
+            new Mock<ILogger<InMemoryMessageQueue>>().Object);
+        var routerMock = new Mock<IMessageRouter>();
+        var brokerHostMock = new Mock<IMqttBrokerHost>();
+        var deadLetterMock = new Mock<IDeadLetterService>();
+        var retryPolicyMock = new Mock<IRetryPolicyProvider>();
+        var firstPublishStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var publishCallCount = 0;
+
+        routerMock.Setup(r => r.RouteAsync(It.IsAny<RouteContext>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new List<ForwardResult> { new() { TargetClientId = "client-2", Success = true } });
+        brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns<string, byte[], int, string?, CancellationToken>(async (_, _, _, _, token) =>
+            {
+                var currentCall = Interlocked.Increment(ref publishCallCount);
+                if (currentCall == 1)
+                {
+                    firstPublishStarted.TrySetResult();
+                    await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                }
+
+                return true;
+            });
+
+        var service = new MessageDeliveryService(
+            queue,
+            routerMock.Object,
+            brokerHostMock.Object,
+            deadLetterMock.Object,
+            retryPolicyMock.Object,
+            Microsoft.Extensions.Options.Options.Create(new ReliabilityOptions
+            {
+                QueueCapacity = 10,
+                EnqueueTimeoutMs = 1000,
+                MaxRetryCount = 3,
+                RetryBaseDelayMs = 10,
+                RetryMaxDelayMs = 100,
+                ForwardTimeoutMs = 5000,
+                ShutdownDrainTimeoutMs = 2000,
+                DropWhenQueueFull = false,
+                MaxConcurrentHandlers = 1
+            }),
+            new Mock<ILogger<MessageDeliveryService>>().Object);
+
+        await service.StartAsync(CancellationToken.None);
+        Assert.True(await queue.EnqueueAsync(message, CancellationToken.None));
+        await firstPublishStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+
+        await service.StopAsync(CancellationToken.None);
+
+        Assert.Equal(2, publishCallCount);
+        Assert.Equal(MessageProcessStatus.Succeeded, message.Status);
+        Assert.Equal(0, queue.Count);
+        deadLetterMock.Verify(d => d.WriteAsync(It.IsAny<DeadLetterRecord>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
     #region 取消语义测试
 
     [Fact]

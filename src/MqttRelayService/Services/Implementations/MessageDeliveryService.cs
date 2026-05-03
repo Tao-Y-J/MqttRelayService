@@ -149,6 +149,11 @@ public class MessageDeliveryService : IMessageDeliveryService
                     // 处理单条消息，异常隔离
                     await ProcessMessageAsync(message, cancellationToken);
                 }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    await PreserveInFlightMessageAsync(message);
+                    break;
+                }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "处理消息 {MessageId} 时发生未处理异常，继续执行",
@@ -164,6 +169,34 @@ public class MessageDeliveryService : IMessageDeliveryService
         {
             _logger.LogError(ex, "消费循环中发生未处理异常");
         }
+    }
+
+    /// <summary>
+    /// 服务停止取消消费时，尽力保留已取出但尚未完成的在途消息。
+    /// 优先重新入队，让 StopAsync 的排空阶段继续处理；回队失败则记录死信。
+    /// </summary>
+    private async Task PreserveInFlightMessageAsync(ForwardMessage message)
+    {
+        try
+        {
+            var preserved = await _queue.EnqueueAsync(message);
+            if (preserved)
+            {
+                _logger.LogInformation("服务停止时已保留在途消息 {MessageId}，等待排空阶段继续处理",
+                    message.RouteContext.MessageId);
+                return;
+            }
+
+            _logger.LogError("服务停止时无法重新入队在途消息 {MessageId}，转入死信",
+                message.RouteContext.MessageId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "服务停止时重新入队在途消息 {MessageId} 失败，转入死信",
+                message.RouteContext.MessageId);
+        }
+
+        await MoveToDeadLetterAsync(message, "服务停止时无法保留在途消息", CancellationToken.None);
     }
 
     /// <summary>
