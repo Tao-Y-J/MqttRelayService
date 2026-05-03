@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using Moq;
 using MqttRelayService.Models;
+using MqttRelayService.Options;
 using MqttRelayService.Services.Implementations;
 using Xunit;
 
@@ -131,5 +132,64 @@ public class ClientRegistryTests
         await Task.WhenAll(tasks);
 
         Assert.Equal(100, _registry.Count);
+    }
+
+    [Fact]
+    public async Task RouteAsync_ConcurrentSubscriptionUpdates_DoesNotThrow()
+    {
+        var session = new ClientSessionInfo
+        {
+            ClientId = "client-1",
+            Username = "user1",
+            ConnectedAt = DateTime.UtcNow,
+            Status = ConnectionStatus.Connected
+        };
+
+        await _registry.RegisterAsync(session);
+
+        var router = new MessageRouter(
+            _registry,
+            Microsoft.Extensions.Options.Options.Create(new RoutingOptions { EchoToSender = true }),
+            new Mock<ILogger<MessageRouter>>().Object);
+
+        var context = new RouteContext
+        {
+            MessageId = "msg-1",
+            Topic = "test/topic",
+            SourceClientId = "client-source"
+        };
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+        var updateTask = Task.Run(async () =>
+        {
+            while (!cts.Token.IsCancellationRequested)
+            {
+                await _registry.UpdateSubscriptionAsync("client-1", "test/topic", true, cts.Token);
+                await _registry.UpdateSubscriptionAsync("client-1", "test/topic", false, cts.Token);
+            }
+        });
+
+        var routeTasks = Enumerable.Range(0, 8)
+            .Select(_ => Task.Run(async () =>
+            {
+                while (!cts.Token.IsCancellationRequested)
+                {
+                    await router.RouteAsync(context, cts.Token);
+                }
+            }))
+            .ToArray();
+
+        await Task.Delay(TimeSpan.FromMilliseconds(500));
+        await cts.CancelAsync();
+
+        var tasks = routeTasks.Append(updateTask).ToArray();
+        var ex = await Record.ExceptionAsync(() => Task.WhenAll(tasks));
+
+        if (ex is OperationCanceledException)
+        {
+            ex = null;
+        }
+
+        Assert.Null(ex);
     }
 }

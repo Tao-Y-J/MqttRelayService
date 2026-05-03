@@ -217,14 +217,17 @@ public class MqttBrokerHost : IMqttBrokerHost, IDisposable
     /// </summary>
     private async Task OnInterceptingPublishAsync(InterceptingPublishEventArgs e)
     {
+        if (IsRelayInjectedMessage(e.ApplicationMessage))
+        {
+            // 服务端注入的转发消息需要继续交给 Broker 分发，避免再次进入内部队列形成循环。
+            return;
+        }
+
+        // 客户端原始发布默认必须由内部队列接管；即使后续入队失败或发生异常，也不能落回 Broker 默认分发路径。
+        e.ProcessPublish = false;
+
         try
         {
-            if (IsRelayInjectedMessage(e.ApplicationMessage))
-            {
-                // 服务端注入的转发消息需要继续交给 Broker 分发，避免再次进入内部队列形成循环。
-                return;
-            }
-
             // 更新客户端活动时间
             await _clientRegistry.UpdateActivityAsync(e.ClientId);
 
@@ -258,9 +261,6 @@ public class MqttBrokerHost : IMqttBrokerHost, IDisposable
             {
                 _logger.LogError("消息 {MessageId} 入队失败，主题 {Topic}", context.MessageId, context.Topic);
             }
-
-            // 阻止 Broker 默认分发，由投递服务控制转发
-            e.ProcessPublish = false;
         }
         catch (Exception ex)
         {

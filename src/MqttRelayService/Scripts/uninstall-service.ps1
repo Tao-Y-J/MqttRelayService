@@ -28,7 +28,7 @@ Write-Host "[信息] 服务当前状态: $($service.Status)"
 Write-Host ""
 
 # 停止服务
-if ($service.Status -eq "Running") {
+if ($service.Status -ne "Stopped") {
     try {
         Write-Host "[步骤] 正在停止服务 '$serviceName' ..."
         Stop-Service -Name $serviceName -Force
@@ -51,7 +51,25 @@ Write-Host ""
 # 删除服务
 try {
     Write-Host "[步骤] 正在删除服务 '$serviceName' ..."
-    Remove-Service -Name $serviceName
+    $scPath = Join-Path $env:SystemRoot "System32\sc.exe"
+    $deleteOutput = & $scPath delete $serviceName 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw ($deleteOutput -join [Environment]::NewLine)
+    }
+
+    for ($i = 0; $i -lt 10; $i++) {
+        Start-Sleep -Milliseconds 500
+        $deletedService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+        if (-not $deletedService) {
+            break
+        }
+    }
+
+    $remainingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+    if ($remainingService) {
+        throw "服务删除请求已提交，但服务仍存在，请关闭服务管理器窗口后重试。"
+    }
+
     Write-Host "[成功] 服务已删除。" -ForegroundColor Green
 } catch {
     Write-Host "[错误] 删除服务失败: $_" -ForegroundColor Red

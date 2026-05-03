@@ -21,6 +21,7 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $baseDir = Split-Path -Parent $scriptDir
 $exePath = Join-Path $baseDir "MqttRelayService.exe"
 $configPath = Join-Path $baseDir "appsettings.json"
+$binaryPathName = "`"$exePath`""
 
 Write-Host "[信息] 脚本目录: $scriptDir"
 Write-Host "[信息] 服务目录: $baseDir"
@@ -82,7 +83,7 @@ if ($existingService) {
 try {
     Write-Host "[步骤] 正在创建 Windows Service '$serviceName' ..."
     New-Service -Name $serviceName `
-        -BinaryPathName $exePath `
+        -BinaryPathName $binaryPathName `
         -DisplayName $displayName `
         -Description $description `
         -StartupType Automatic

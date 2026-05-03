@@ -29,7 +29,7 @@ public class ClientRegistry : IClientRegistry
     {
         try
         {
-            _sessions[session.ClientId] = session;
+            _sessions[session.ClientId] = CloneSession(session);
             _logger.LogInformation("客户端 {ClientId} 已注册到在线客户端表，当前在线数 {Count}",
                 session.ClientId, Count);
         }
@@ -68,7 +68,7 @@ public class ClientRegistry : IClientRegistry
     public Task<ClientSessionInfo?> GetSessionAsync(string clientId, CancellationToken cancellationToken = default)
     {
         _sessions.TryGetValue(clientId, out var session);
-        return Task.FromResult(session);
+        return Task.FromResult(session == null ? null : CloneSession(session));
     }
 
     /// <summary>
@@ -76,7 +76,8 @@ public class ClientRegistry : IClientRegistry
     /// </summary>
     public Task<IReadOnlyCollection<ClientSessionInfo>> GetAllSessionsAsync(CancellationToken cancellationToken = default)
     {
-        return Task.FromResult<IReadOnlyCollection<ClientSessionInfo>>(_sessions.Values.ToList());
+        var sessions = _sessions.Values.Select(CloneSession).ToList();
+        return Task.FromResult<IReadOnlyCollection<ClientSessionInfo>>(sessions);
     }
 
     /// <summary>
@@ -88,15 +89,18 @@ public class ClientRegistry : IClientRegistry
         {
             if (_sessions.TryGetValue(clientId, out var session))
             {
-                if (isSubscribed)
+                lock (session)
                 {
-                    session.Subscriptions.Add(topic);
-                    _logger.LogDebug("客户端 {ClientId} 订阅主题 {Topic}", clientId, topic);
-                }
-                else
-                {
-                    session.Subscriptions.Remove(topic);
-                    _logger.LogDebug("客户端 {ClientId} 取消订阅主题 {Topic}", clientId, topic);
+                    if (isSubscribed)
+                    {
+                        session.Subscriptions.Add(topic);
+                        _logger.LogDebug("客户端 {ClientId} 订阅主题 {Topic}", clientId, topic);
+                    }
+                    else
+                    {
+                        session.Subscriptions.Remove(topic);
+                        _logger.LogDebug("客户端 {ClientId} 取消订阅主题 {Topic}", clientId, topic);
+                    }
                 }
             }
         }
@@ -115,9 +119,31 @@ public class ClientRegistry : IClientRegistry
     {
         if (_sessions.TryGetValue(clientId, out var session))
         {
-            session.LastActivityAt = DateTime.UtcNow;
+            lock (session)
+            {
+                session.LastActivityAt = DateTime.UtcNow;
+            }
         }
 
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// 创建会话快照，避免外部代码和路由线程并发读写同一个订阅集合。
+    /// </summary>
+    private static ClientSessionInfo CloneSession(ClientSessionInfo session)
+    {
+        lock (session)
+        {
+            return new ClientSessionInfo
+            {
+                ClientId = session.ClientId,
+                Username = session.Username,
+                ConnectedAt = session.ConnectedAt,
+                LastActivityAt = session.LastActivityAt,
+                Status = session.Status,
+                Subscriptions = session.Subscriptions.ToHashSet()
+            };
+        }
     }
 }

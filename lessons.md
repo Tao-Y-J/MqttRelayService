@@ -124,3 +124,17 @@ powershell -ExecutionPolicy Bypass -NoProfile -Command "& '%~dp0install-service.
 - 最后记录排空数量和剩余数量
 
 **注意**：`TryDequeueAsync` 必须使用非阻塞实现（`ChannelReader.TryRead`），否则 drain 阶段会卡死。
+
+### 6.6 发布拦截必须先阻断默认分发
+
+客户端原始发布进入 `InterceptingPublishAsync` 后，必须先设置 `ProcessPublish=false`，再执行活动时间更新、Payload 转换和入队。这样即使拦截链路发生异常，消息也不会回落到 Broker 默认分发路径，避免绕过内部队列、重试、死信和 `EchoToSender` 控制。
+
+服务端注入的转发消息必须先识别并放行，避免转发消息再次进入内部队列形成循环。
+
+### 6.7 注册表返回快照，不暴露内部可变集合
+
+客户端订阅集合会被 MQTT 订阅事件更新，同时被路由线程枚举。`HashSet<T>` 不能并发读写，注册表对外返回会话时必须返回快照，不能暴露内部 `Subscriptions` 集合。
+
+### 6.8 Worker 停机先取消循环，再停止被监控对象
+
+如果后台 Worker 的监控循环会根据 `IsRunning=false` 触发重启，停机时必须先让监控循环退出，再停止被监控对象。反过来先停止 Broker 会让监控循环误判为异常停止并触发重启。

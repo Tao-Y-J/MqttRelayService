@@ -9,6 +9,8 @@ using MQTTnet.Formatter;
 using MQTTnet.Packets;
 using MQTTnet.Protocol;
 using MqttRelayService.Options;
+using MqttRelayService.Models;
+using MqttRelayService.Services.Abstractions;
 using MqttRelayService.Services.Implementations;
 using Xunit;
 
@@ -467,5 +469,122 @@ public class MqttBrokerIntegrationTests
             await broker.StopAsync();
             broker.Dispose();
         }
+    }
+
+    /// <summary>
+    /// 发布拦截器内部异常时，客户端原始消息不能回落到 Broker 默认分发路径。
+    /// </summary>
+    [Fact]
+    public async Task ClientPublish_WhenInterceptingThrows_DoesNotUseDefaultBrokerDistribution()
+    {
+        var port = GetAvailablePort();
+
+        var reliabilityOptions = Microsoft.Extensions.Options.Options.Create(new ReliabilityOptions
+        {
+            QueueCapacity = 1000,
+            EnqueueTimeoutMs = 2000,
+            MaxRetryCount = 3,
+            RetryBaseDelayMs = 100,
+            RetryMaxDelayMs = 1000,
+            ForwardTimeoutMs = 5000,
+            ShutdownDrainTimeoutMs = 2000,
+            EnableDeadLetter = false,
+            DropWhenQueueFull = false
+        });
+
+        var broker = new MqttBrokerHost(
+            new AuthService(
+                Microsoft.Extensions.Options.Options.Create(new AuthOptions { AllowAnonymous = true }),
+                Mock.Of<ILogger<AuthService>>()),
+            new ThrowingActivityClientRegistry(),
+            new InMemoryMessageQueue(reliabilityOptions, Mock.Of<ILogger<InMemoryMessageQueue>>()),
+            Microsoft.Extensions.Options.Options.Create(new MqttOptions { TcpPort = port }),
+            Microsoft.Extensions.Options.Options.Create(new RoutingOptions { EchoToSender = false }),
+            Mock.Of<ILogger<MqttBrokerHost>>());
+
+        try
+        {
+            await broker.StartAsync();
+
+            var factory = new MqttClientFactory();
+            var publisher = factory.CreateMqttClient();
+            var subscriber = factory.CreateMqttClient();
+
+            try
+            {
+                var publisherOptions = new MqttClientOptionsBuilder()
+                    .WithTcpServer("127.0.0.1", port)
+                    .WithClientId("client-intercept-ex-pub")
+                    .WithProtocolVersion(MqttProtocolVersion.V500)
+                    .Build();
+                var subscriberOptions = new MqttClientOptionsBuilder()
+                    .WithTcpServer("127.0.0.1", port)
+                    .WithClientId("client-intercept-ex-sub")
+                    .WithProtocolVersion(MqttProtocolVersion.V500)
+                    .Build();
+
+                await publisher.ConnectAsync(publisherOptions);
+                await subscriber.ConnectAsync(subscriberOptions);
+
+                var topic = "test/intercept-exception";
+                await subscriber.SubscribeAsync(new MqttClientSubscribeOptions
+                {
+                    TopicFilters = [new MqttTopicFilter { Topic = topic, QualityOfServiceLevel = MqttQualityOfServiceLevel.AtLeastOnce }]
+                });
+
+                var received = new TaskCompletionSource<string>();
+                subscriber.ApplicationMessageReceivedAsync += e =>
+                {
+                    received.TrySetResult(Encoding.UTF8.GetString(e.ApplicationMessage.Payload));
+                    return Task.CompletedTask;
+                };
+
+                var message = new MqttApplicationMessageBuilder()
+                    .WithTopic(topic)
+                    .WithPayload(Encoding.UTF8.GetBytes("should-not-bypass-queue"))
+                    .Build();
+
+                await publisher.PublishAsync(message);
+
+                var timeout = Task.Delay(TimeSpan.FromSeconds(1));
+                var completed = await Task.WhenAny(received.Task, timeout);
+                Assert.Equal(timeout, completed);
+                Assert.False(received.Task.IsCompleted);
+            }
+            finally
+            {
+                await publisher.DisconnectAsync();
+                await subscriber.DisconnectAsync();
+                publisher.Dispose();
+                subscriber.Dispose();
+            }
+        }
+        finally
+        {
+            await broker.StopAsync();
+            broker.Dispose();
+        }
+    }
+
+    private class ThrowingActivityClientRegistry : IClientRegistry
+    {
+        public int Count => 0;
+
+        public Task RegisterAsync(ClientSessionInfo session, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task UnregisterAsync(string clientId, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task<ClientSessionInfo?> GetSessionAsync(string clientId, CancellationToken cancellationToken = default) => Task.FromResult<ClientSessionInfo?>(null);
+
+        public Task<IReadOnlyCollection<ClientSessionInfo>> GetAllSessionsAsync(CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<IReadOnlyCollection<ClientSessionInfo>>(Array.Empty<ClientSessionInfo>());
+        }
+
+        public Task UpdateSubscriptionAsync(string clientId, string topic, bool isSubscribed, CancellationToken cancellationToken = default)
+            => Task.CompletedTask;
+
+        public Task UpdateActivityAsync(string clientId, CancellationToken cancellationToken = default)
+            => throw new InvalidOperationException("activity update failed");
     }
 }

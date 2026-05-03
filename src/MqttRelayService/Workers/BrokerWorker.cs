@@ -8,11 +8,16 @@ namespace MqttRelayService.Workers;
 public class BrokerWorker : BackgroundService
 {
     private readonly IMqttBrokerHost _brokerHost;
+    private readonly IHostApplicationLifetime _applicationLifetime;
     private readonly ILogger<BrokerWorker> _logger;
 
-    public BrokerWorker(IMqttBrokerHost brokerHost, ILogger<BrokerWorker> logger)
+    public BrokerWorker(
+        IMqttBrokerHost brokerHost,
+        IHostApplicationLifetime applicationLifetime,
+        ILogger<BrokerWorker> logger)
     {
         _brokerHost = brokerHost;
+        _applicationLifetime = applicationLifetime;
         _logger = logger;
     }
 
@@ -29,8 +34,9 @@ public class BrokerWorker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Broker 启动失败");
-            // 启动失败是致命错误，让 Host 处理
-            throw;
+            // 启动失败是致命错误，主动请求 Host 停止，避免 Windows Service 假存活。
+            _applicationLifetime.StopApplication();
+            return;
         }
 
         // 监控循环：检查 Broker 状态，异常停止时自动重启
@@ -86,8 +92,8 @@ public class BrokerWorker : BackgroundService
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("BrokerWorker 正在停止...");
-        await _brokerHost.StopAsync(cancellationToken);
         await base.StopAsync(cancellationToken);
+        await _brokerHost.StopAsync(cancellationToken);
         _logger.LogInformation("BrokerWorker 已停止");
     }
 }
