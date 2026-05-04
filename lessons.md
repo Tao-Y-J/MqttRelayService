@@ -156,6 +156,6 @@ powershell -ExecutionPolicy Bypass -NoProfile -Command "& '%~dp0install-service.
 - 如果希望停机阶段至少覆盖一次失败消息的最大退避等待，配置上必须保持 `ShutdownDrainTimeoutMs >= RetryMaxDelayMs`
 - 如果 `ShutdownDrainTimeoutMs < RetryMaxDelayMs`，停机超时会先触发，消息会进入“保留回队列或死信”的收敛分支，而不会完成当次下一次注入尝试
 
-### 6.10 可复用服务实例必须清理生命周期状态
+### 6.10 可复用服务实例必须区分“已退出消费者”和“悬挂消费者”
 
-`MessageDeliveryService` 停止后必须释放 `_cts` 并清空 `_consumerTasks`，否则同一实例再次执行 `StartAsync -> StopAsync` 时会混入上一次运行的生命周期状态。
+`MessageDeliveryService` 停止后必须释放 `_cts`，并且只移除已经完成的 `_consumerTasks`。如果仍有未响应取消的消费者，必须保留任务引用并拒绝再次启动；否则同一实例再次执行 `StartAsync -> StopAsync` 时，会与上一轮悬挂消费者并存，突破 `MaxConcurrentHandlers`，并在“已停止”状态下继续处理消息。

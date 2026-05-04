@@ -1,4 +1,4 @@
-using MqttRelayService.Logging;
+﻿using MqttRelayService.Logging;
 using MqttRelayService.Options;
 using MqttRelayService.Services.Abstractions;
 using MqttRelayService.Services.Implementations;
@@ -39,7 +39,7 @@ public class Program
             {
                 options.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore;
                 options.ShutdownTimeout = TimeSpan.FromMilliseconds(
-                    builder.Configuration.GetValue("Reliability:ShutdownDrainTimeoutMs", 10000));
+                    builder.Configuration.GetValue("Reliability:ShutdownDrainTimeoutMs", 30000));
             });
 
             // 注册配置选项

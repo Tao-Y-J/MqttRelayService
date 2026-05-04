@@ -11,6 +11,9 @@ namespace MqttRelayService.Services.Implementations;
 /// </summary>
 public class MessageDeliveryService : IMessageDeliveryService
 {
+    private const int ConsumerShutdownWaitTimeoutMs = 2000;
+    private const int RetrySettlementWaitTimeoutMs = 2000;
+
     private readonly IMessageQueue _queue;
     private readonly IMessageRouter _router;
     private readonly IMqttBrokerHost _brokerHost;
@@ -19,6 +22,7 @@ public class MessageDeliveryService : IMessageDeliveryService
     private readonly ReliabilityOptions _options;
     private readonly ILogger<MessageDeliveryService> _logger;
 
+    private readonly object _lifecycleLock = new();
     private readonly List<Task> _consumerTasks = new();
     private readonly object _retryTasksLock = new();
     private readonly HashSet<Task> _retryTasks = new();
@@ -48,20 +52,42 @@ public class MessageDeliveryService : IMessageDeliveryService
     /// </summary>
     public Task StartAsync(CancellationToken cancellationToken = default)
     {
-        if (_cts != null || _consumerTasks.Count > 0)
+        CancellationTokenSource runCts;
+        var handlerCount = 0;
+        var shouldLogDrainTimeoutWarning = false;
+
+        lock (_lifecycleLock)
         {
-            _logger.LogWarning("消息投递服务已处于启动状态，忽略重复启动请求");
-            return Task.CompletedTask;
+            _consumerTasks.RemoveAll(static task => task.IsCompleted);
+
+            if (_cts != null)
+            {
+                _logger.LogWarning("消息投递服务已处于启动状态，忽略重复启动请求");
+                return Task.CompletedTask;
+            }
+
+            if (_consumerTasks.Count > 0)
+            {
+                _logger.LogError("消息投递服务上一次停止后仍有 {ConsumerCount} 个消费者未退出，拒绝重新启动",
+                    _consumerTasks.Count);
+                return Task.CompletedTask;
+            }
+
+            _isStopping = false;
+            shouldLogDrainTimeoutWarning = ShouldLogDrainTimeoutConfigurationWarning();
+            runCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _cts = runCts;
+            handlerCount = Math.Max(1, _options.MaxConcurrentHandlers);
+
+            for (int i = 0; i < handlerCount; i++)
+            {
+                _consumerTasks.Add(Task.Run(() => ConsumeLoopAsync(runCts.Token), runCts.Token));
+            }
         }
 
-        _isStopping = false;
-        LogDrainTimeoutConfigurationWarning();
-        _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var handlerCount = Math.Max(1, _options.MaxConcurrentHandlers);
-
-        for (int i = 0; i < handlerCount; i++)
+        if (shouldLogDrainTimeoutWarning)
         {
-            _consumerTasks.Add(Task.Run(() => ConsumeLoopAsync(_cts.Token), _cts.Token));
+            LogDrainTimeoutConfigurationWarning();
         }
 
         _logger.LogInformation("消息投递服务已启动，消费者数量 {HandlerCount}", handlerCount);
@@ -74,29 +100,39 @@ public class MessageDeliveryService : IMessageDeliveryService
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
         _logger.LogInformation("消息投递服务正在停止……");
-        _isStopping = true;
+        CancellationTokenSource? ctsToCancel;
+        Task[] consumerSnapshot;
 
-        if (_cts == null && _consumerTasks.Count == 0)
+        lock (_lifecycleLock)
         {
-            _isStopping = false;
-            return;
+            _consumerTasks.RemoveAll(static task => task.IsCompleted);
+
+            if (_cts == null && _consumerTasks.Count == 0)
+            {
+                _isStopping = false;
+                return;
+            }
+
+            _isStopping = true;
+            ctsToCancel = _cts;
+            consumerSnapshot = _consumerTasks.ToArray();
         }
 
         try
         {
             // 阶段 1：取消消费循环的 ReadAllAsync，停止接收新消息
-            _cts?.Cancel();
+            ctsToCancel?.Cancel();
 
-            if (_consumerTasks.Count > 0)
+            if (consumerSnapshot.Length > 0)
             {
                 // 等待所有消费者退出
-                var allConsumersTask = Task.WhenAll(_consumerTasks);
-                await Task.WhenAny(allConsumersTask, Task.Delay(2000, cancellationToken));
+                var allConsumersTask = Task.WhenAll(consumerSnapshot);
+                await Task.WhenAny(allConsumersTask, Task.Delay(ConsumerShutdownWaitTimeoutMs, cancellationToken));
             }
 
             // 阶段 1.5：等待所有后台重试调度任务收敛
             // 取消信号下，这些任务会快速结束（进入"保留或死信"分支），无需等待真实的退避延迟
-            await WaitForPendingRetriesInternalAsync(TimeSpan.FromSeconds(2), cancellationToken);
+            await WaitForPendingRetriesInternalAsync(TimeSpan.FromMilliseconds(RetrySettlementWaitTimeoutMs), cancellationToken);
 
             // 阶段 2：排空队列中剩余的消息
             var drainTimeout = TimeSpan.FromMilliseconds(_options.ShutdownDrainTimeoutMs);
@@ -155,7 +191,17 @@ public class MessageDeliveryService : IMessageDeliveryService
         }
         finally
         {
-            ResetLifecycleState();
+            int remainingConsumerCount;
+            lock (_lifecycleLock)
+            {
+                remainingConsumerCount = ResetLifecycleState();
+            }
+
+            if (remainingConsumerCount > 0)
+            {
+                _logger.LogError("投递服务停止时仍有 {ConsumerCount} 个消费者未退出，已保留引用并拒绝后续重启，直到这些消费者自行结束",
+                    remainingConsumerCount);
+            }
         }
     }
 
@@ -544,6 +590,8 @@ public class MessageDeliveryService : IMessageDeliveryService
 
         try
         {
+            // 这里只等待当前快照中的任务；若在取快照后又有任务加入，
+            // 会由停机取消信号和后续 drain 阶段的保留逻辑继续收敛。
             await Task.WhenAny(Task.WhenAll(snapshot), Task.Delay(timeout, cancellationToken));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -555,13 +603,16 @@ public class MessageDeliveryService : IMessageDeliveryService
     /// <summary>
     /// 启动时检查停机排空配置是否覆盖最大退避时间，避免停机时第一条失败消息还未等到下一次注入尝试就触发排空超时。
     /// </summary>
+    private bool ShouldLogDrainTimeoutConfigurationWarning()
+    {
+        return _options.ShutdownDrainTimeoutMs < _options.RetryMaxDelayMs;
+    }
+
+    /// <summary>
+    /// 启动时记录停机排空配置提示。
+    /// </summary>
     private void LogDrainTimeoutConfigurationWarning()
     {
-        if (_options.ShutdownDrainTimeoutMs >= _options.RetryMaxDelayMs)
-        {
-            return;
-        }
-
         _logger.LogWarning(
             "可靠性配置提示：ShutdownDrainTimeoutMs({ShutdownDrainTimeoutMs}ms) 小于 RetryMaxDelayMs({RetryMaxDelayMs}ms)。停机排空阶段若遇到失败消息，超时可能先于单次最大退避结束，消息会转入保留回队列或死信收敛，而不会完成当次下一次注入尝试。",
             _options.ShutdownDrainTimeoutMs,
@@ -571,11 +622,11 @@ public class MessageDeliveryService : IMessageDeliveryService
     /// <summary>
     /// 停止完成后清理生命周期状态，确保同一实例可以再次启动。
     /// </summary>
-    private void ResetLifecycleState()
+    private int ResetLifecycleState()
     {
         _cts?.Dispose();
         _cts = null;
-        _consumerTasks.Clear();
+        _consumerTasks.RemoveAll(static task => task.IsCompleted);
 
         lock (_retryTasksLock)
         {
@@ -583,6 +634,7 @@ public class MessageDeliveryService : IMessageDeliveryService
         }
 
         _isStopping = false;
+        return _consumerTasks.Count;
     }
 
     /// <summary>

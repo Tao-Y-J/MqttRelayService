@@ -105,7 +105,7 @@ Scripts\uninstall-service.cmd
     "EnableDeadLetter": true,
     "DeadLetterPath": "data/deadletter",
     "ForwardTimeoutMs": 5000,
-    "ShutdownDrainTimeoutMs": 10000,
+    "ShutdownDrainTimeoutMs": 30000,
     "DropWhenQueueFull": false
   },
   "Serilog": {
@@ -138,7 +138,7 @@ Scripts\uninstall-service.cmd
 | **Reliability** | `DeadLetterPath` | 死信文件存储目录 |
 | **Serilog** | `RetentionDays` | 日志文件保留天数 |
 
-停机排空使用 `ShutdownDrainTimeoutMs` 作为总超时。当前实现中，停机 drain 阶段遇到失败消息时会同步等待该次退避结束后再尝试重新入队；如果希望停机阶段至少覆盖一次失败消息的最大退避等待，请保持 `ShutdownDrainTimeoutMs >= RetryMaxDelayMs`。当 `ShutdownDrainTimeoutMs` 更小，排空超时会先触发，消息将按当前逻辑保留回队列或转入死信收敛，不再继续当次下一次注入尝试。
+停机排空使用 `ShutdownDrainTimeoutMs` 作为总超时。当前默认配置已将 `ShutdownDrainTimeoutMs` 设置为 `30000ms`，与默认 `RetryMaxDelayMs` 一致。停机 drain 阶段遇到失败消息时会同步等待该次退避结束后再尝试重新入队；如果将 `ShutdownDrainTimeoutMs` 调小到 `RetryMaxDelayMs` 以下，排空超时会先触发，消息将按当前逻辑保留回队列或转入死信收敛，不再继续当次下一次注入尝试。
 
 ## Topic 规范
 

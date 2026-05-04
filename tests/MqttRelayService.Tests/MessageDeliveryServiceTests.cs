@@ -388,7 +388,7 @@ public class MessageDeliveryServiceTests
         routerMock.Setup(r => r.RouteAsync(It.IsAny<RouteContext>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new List<ForwardResult> { new() { TargetClientId = "client-2", Success = true } });
         brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(() => ++publishCallCount >= 2);
+            .ReturnsAsync(() => Interlocked.Increment(ref publishCallCount) >= 2);
         retryPolicyMock.Setup(rp => rp.GetDelayAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(TimeSpan.FromMilliseconds(50));
 
@@ -415,7 +415,6 @@ public class MessageDeliveryServiceTests
         await Task.Delay(100);
 
         await service.StopAsync(CancellationToken.None);
-        await Task.Delay(120);
 
         Assert.Equal(2, publishCallCount);
         Assert.Equal(1, message.RetryCount);
@@ -483,6 +482,50 @@ public class MessageDeliveryServiceTests
         await service.StopAsync(CancellationToken.None);
 
         Assert.Contains(logMessages, msg =>
+            msg.Contains("ShutdownDrainTimeoutMs", StringComparison.Ordinal) &&
+            msg.Contains("RetryMaxDelayMs", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task StartAsync_DefaultConfiguration_DoesNotLogDrainTimeoutWarning()
+    {
+        var queueMock = new Mock<IMessageQueue>();
+        var logMessages = new List<string>();
+        var loggerMock = new Mock<ILogger<MessageDeliveryService>>();
+
+        loggerMock.Setup(x => x.Log(
+                It.IsAny<LogLevel>(),
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((o, t) => true),
+                It.IsAny<Exception?>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()))
+            .Callback(new InvocationAction(i =>
+            {
+                var formatter = i.Arguments[4] as Delegate;
+                var msg = formatter?.DynamicInvoke(i.Arguments[2], i.Arguments[3])?.ToString();
+                if (msg != null)
+                {
+                    logMessages.Add(msg);
+                }
+            }));
+
+        queueMock.Setup(q => q.ReadAllAsync(It.IsAny<CancellationToken>()))
+            .Returns(GetEmptyAsyncEnumerable());
+
+        var service = new MessageDeliveryService(
+            queueMock.Object,
+            new Mock<IMessageRouter>().Object,
+            new Mock<IMqttBrokerHost>().Object,
+            new Mock<IDeadLetterService>().Object,
+            new Mock<IRetryPolicyProvider>().Object,
+            Microsoft.Extensions.Options.Options.Create(new ReliabilityOptions()),
+            loggerMock.Object);
+
+        await service.StartAsync(CancellationToken.None);
+        await Task.Delay(100);
+        await service.StopAsync(CancellationToken.None);
+
+        Assert.DoesNotContain(logMessages, msg =>
             msg.Contains("ShutdownDrainTimeoutMs", StringComparison.Ordinal) &&
             msg.Contains("RetryMaxDelayMs", StringComparison.Ordinal));
     }
@@ -846,6 +889,91 @@ public class MessageDeliveryServiceTests
         await service.StopAsync(CancellationToken.None);
 
         queueMock.Verify(q => q.ReadAllAsync(It.IsAny<CancellationToken>()), Times.Exactly(2));
+    }
+
+    [Fact]
+    public async Task StartAsync_WhenPreviousConsumerStillRunning_RefusesRestart()
+    {
+        var message = CreateTestMessage();
+        var queue = new InMemoryMessageQueue(
+            Microsoft.Extensions.Options.Options.Create(new ReliabilityOptions
+            {
+                QueueCapacity = 10,
+                EnqueueTimeoutMs = 1000,
+                MaxRetryCount = 3,
+                RetryBaseDelayMs = 10,
+                RetryMaxDelayMs = 100,
+                ForwardTimeoutMs = 5000,
+                ShutdownDrainTimeoutMs = 2000,
+                DropWhenQueueFull = false,
+                MaxConcurrentHandlers = 1
+            }),
+            new Mock<ILogger<InMemoryMessageQueue>>().Object);
+        var routerMock = new Mock<IMessageRouter>();
+        var brokerHostMock = new Mock<IMqttBrokerHost>();
+        var logMessages = new List<string>();
+        var loggerMock = new Mock<ILogger<MessageDeliveryService>>();
+        var publishStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowPublishToFinish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        loggerMock.Setup(x => x.Log(
+                It.IsAny<LogLevel>(),
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((o, t) => true),
+                It.IsAny<Exception?>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()))
+            .Callback(new InvocationAction(i =>
+            {
+                var formatter = i.Arguments[4] as Delegate;
+                var msg = formatter?.DynamicInvoke(i.Arguments[2], i.Arguments[3])?.ToString();
+                if (msg != null)
+                {
+                    logMessages.Add(msg);
+                }
+            }));
+
+        routerMock.Setup(r => r.RouteAsync(It.IsAny<RouteContext>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new List<ForwardResult> { new() { TargetClientId = "client-2", Success = true } });
+        brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns<string, byte[], int, string?, CancellationToken>(async (_, _, _, _, _) =>
+            {
+                publishStarted.TrySetResult();
+                await allowPublishToFinish.Task;
+                return true;
+            });
+
+        var service = new MessageDeliveryService(
+            queue,
+            routerMock.Object,
+            brokerHostMock.Object,
+            new Mock<IDeadLetterService>().Object,
+            new Mock<IRetryPolicyProvider>().Object,
+            Microsoft.Extensions.Options.Options.Create(new ReliabilityOptions
+            {
+                QueueCapacity = 10,
+                EnqueueTimeoutMs = 1000,
+                MaxRetryCount = 3,
+                RetryBaseDelayMs = 10,
+                RetryMaxDelayMs = 100,
+                ForwardTimeoutMs = 5000,
+                ShutdownDrainTimeoutMs = 2000,
+                DropWhenQueueFull = false,
+                MaxConcurrentHandlers = 1
+            }),
+            loggerMock.Object);
+
+        await service.StartAsync(CancellationToken.None);
+        Assert.True(await queue.EnqueueAsync(message, CancellationToken.None));
+        await publishStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+
+        await service.StopAsync(CancellationToken.None);
+        await service.StartAsync(CancellationToken.None);
+
+        Assert.Contains(logMessages, msg => msg.Contains("拒绝重新启动", StringComparison.Ordinal));
+
+        allowPublishToFinish.TrySetResult();
+        await Task.Delay(100);
+        await service.StopAsync(CancellationToken.None);
     }
 
     #endregion

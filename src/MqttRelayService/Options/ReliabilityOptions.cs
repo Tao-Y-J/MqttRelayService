@@ -59,7 +59,7 @@ public class ReliabilityOptions
     /// 停机排空超时（毫秒）。
     /// 若希望停机阶段至少覆盖一次失败消息的最大退避等待，应不小于 RetryMaxDelayMs。
     /// </summary>
-    public int ShutdownDrainTimeoutMs { get; set; } = 10000;
+    public int ShutdownDrainTimeoutMs { get; set; } = 30000;
 
     /// <summary>
     /// 队列满时是否丢弃新消息（否则阻塞等待）
