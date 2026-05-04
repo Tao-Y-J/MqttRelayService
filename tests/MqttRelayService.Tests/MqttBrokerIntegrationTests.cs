@@ -351,7 +351,7 @@ public class MqttBrokerIntegrationTests
     }
 
     /// <summary>
-    /// 客户端发布后，消息应进入 IMessageQueue（Count &gt; 0）
+    /// 客户端发布后，消息应进入 IMessageQueue（Count 大于 0）
     /// </summary>
     [Fact]
     public async Task ClientPublish_MessageEntersQueue()

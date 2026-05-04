@@ -20,6 +20,8 @@ public class MessageDeliveryService : IMessageDeliveryService
     private readonly ILogger<MessageDeliveryService> _logger;
 
     private readonly List<Task> _consumerTasks = new();
+    private readonly object _retryTasksLock = new();
+    private readonly HashSet<Task> _retryTasks = new();
     private CancellationTokenSource? _cts;
 
     public MessageDeliveryService(
@@ -58,11 +60,11 @@ public class MessageDeliveryService : IMessageDeliveryService
     }
 
     /// <summary>
-    /// 停止投递服务，先取消消费循环，再在超时内尽量排空队列中剩余消息
+    /// 停止投递服务，先取消消费循环，等待重试调度收敛，再在超时内尽量排空队列中剩余消息
     /// </summary>
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
-        _logger.LogInformation("消息投递服务正在停止...");
+        _logger.LogInformation("消息投递服务正在停止……");
 
         if (_consumerTasks.Count == 0)
         {
@@ -77,6 +79,10 @@ public class MessageDeliveryService : IMessageDeliveryService
             // 等待所有消费者退出
             var allConsumersTask = Task.WhenAll(_consumerTasks);
             await Task.WhenAny(allConsumersTask, Task.Delay(2000, cancellationToken));
+
+            // 阶段 1.5：等待所有后台重试调度任务收敛
+            // 取消信号下，这些任务会快速结束（进入"保留或死信"分支），无需等待真实的退避延迟
+            await WaitForPendingRetriesInternalAsync(TimeSpan.FromSeconds(2), cancellationToken);
 
             // 阶段 2：排空队列中剩余的消息
             var drainTimeout = TimeSpan.FromMilliseconds(_options.ShutdownDrainTimeoutMs);
@@ -236,7 +242,7 @@ public class MessageDeliveryService : IMessageDeliveryService
             }
             else
             {
-                // 注入失败，进入重试
+                // 注入失败，进入重试调度
                 await HandleFailureAsync(message, "消息注入失败", cancellationToken);
             }
         }
@@ -304,7 +310,8 @@ public class MessageDeliveryService : IMessageDeliveryService
     }
 
     /// <summary>
-    /// 处理转发失败：重试或进入死信
+    /// 处理转发失败：超过重试次数则进入死信，否则非阻塞地调度延迟重新入队，
+    /// 让消费者立即返回处理下一条消息（不会被退避延迟阻塞）。
     /// </summary>
     private async Task HandleFailureAsync(ForwardMessage message, string reason, CancellationToken cancellationToken)
     {
@@ -315,43 +322,166 @@ public class MessageDeliveryService : IMessageDeliveryService
             cancellationToken.ThrowIfCancellationRequested();
         }
 
-        message.RetryCount++;
+        var nextRetryCount = message.RetryCount + 1;
 
-        if (message.RetryCount <= _options.MaxRetryCount)
+        if (nextRetryCount <= _options.MaxRetryCount)
         {
             // 计算重试延迟
-            var delay = await _retryPolicy.GetDelayAsync(message.RetryCount, cancellationToken);
+            var delay = await _retryPolicy.GetDelayAsync(nextRetryCount, cancellationToken);
             message.NextRetryAt = DateTime.UtcNow.Add(delay);
 
             _logger.LogWarning("消息 {MessageId} 第 {RetryCount} 次转发失败，{DelayMs}ms 后重试，原因：{Reason}",
-                message.RouteContext.MessageId, message.RetryCount, delay.TotalMilliseconds, reason);
+                message.RouteContext.MessageId, nextRetryCount, delay.TotalMilliseconds, reason);
 
-            // 等待退避延迟（当前多消费者场景，单个消费者阻塞不影响其他消费者）
-            try
-            {
-                await Task.Delay(delay, cancellationToken);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                // 取消时不增加重试计数，重新抛出
-                message.RetryCount--;
-                throw new OperationCanceledException(cancellationToken);
-            }
-
-            // 重新入队等待重试
-            var enqueued = await _queue.EnqueueAsync(message, cancellationToken);
-            if (!enqueued)
-            {
-                _logger.LogError("消息 {MessageId} 重试入队失败，直接进入死信",
-                    message.RouteContext.MessageId);
-                await MoveToDeadLetterAsync(message, "重试入队失败：" + reason, cancellationToken);
-            }
+            // 非阻塞调度：消费者立即返回处理下一条消息；
+            // 实际的退避延迟和重新入队在后台任务中执行
+            ScheduleRetryEnqueue(message, delay, reason, cancellationToken);
         }
         else
         {
             _logger.LogError("消息 {MessageId} 超过最大重试次数 {MaxRetryCount}，进入死信",
                 message.RouteContext.MessageId, _options.MaxRetryCount);
             await MoveToDeadLetterAsync(message, reason, cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// 后台延迟+入队任务的调度，非阻塞地完成退避重试，
+    /// 取消时尝试将消息保留到队列（让 drain 阶段处理），失败则转入死信。
+    /// </summary>
+    private void ScheduleRetryEnqueue(
+        ForwardMessage message,
+        TimeSpan delay,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        var task = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(delay, cancellationToken);
+
+                // 延迟正常完成后才正式增加重试计数，保证取消场景下计数不被错误推进
+                message.RetryCount++;
+
+                var enqueued = await _queue.EnqueueAsync(message, cancellationToken);
+                if (!enqueued)
+                {
+                    _logger.LogError("消息 {MessageId} 重试入队失败，直接进入死信",
+                        message.RouteContext.MessageId);
+                    await MoveToDeadLetterAsync(message, "重试入队失败：" + reason, CancellationToken.None);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // 服务停止取消重试调度；尝试将消息保留到队列让 drain 处理，失败则转入死信
+                _logger.LogInformation("消息 {MessageId} 重试调度因服务停止而中止，尝试保留",
+                    message.RouteContext.MessageId);
+                try
+                {
+                    var preserved = await _queue.EnqueueAsync(message, CancellationToken.None);
+                    if (!preserved)
+                    {
+                        await MoveToDeadLetterAsync(
+                            message,
+                            "服务停止时取消重试调度：" + reason,
+                            CancellationToken.None);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "消息 {MessageId} 在重试调度取消时保留失败，转入死信",
+                        message.RouteContext.MessageId);
+                    try
+                    {
+                        await MoveToDeadLetterAsync(
+                            message,
+                            "服务停止时保留消息异常：" + reason,
+                            CancellationToken.None);
+                    }
+                    catch (Exception writeEx)
+                    {
+                        _logger.LogError(writeEx, "消息 {MessageId} 写入死信也失败", message.RouteContext.MessageId);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "消息 {MessageId} 重试调度任务发生异常，转入死信",
+                    message.RouteContext.MessageId);
+                try
+                {
+                    await MoveToDeadLetterAsync(
+                        message,
+                        "重试调度异常：" + reason,
+                        CancellationToken.None);
+                }
+                catch (Exception writeEx)
+                {
+                    _logger.LogError(writeEx, "消息 {MessageId} 写入死信失败", message.RouteContext.MessageId);
+                }
+            }
+        });
+
+        TrackRetryTask(task);
+    }
+
+    /// <summary>
+    /// 跟踪后台重试调度任务，任务完成后自动从集合中移除，避免长期运行场景下的引用堆积。
+    /// </summary>
+    private void TrackRetryTask(Task task)
+    {
+        lock (_retryTasksLock)
+        {
+            _retryTasks.Add(task);
+        }
+
+        // 任务完成时清理引用（在线程池上调度，避免与外层 lock 形成同步死锁）
+        _ = task.ContinueWith(t =>
+        {
+            lock (_retryTasksLock)
+            {
+                _retryTasks.Remove(t);
+            }
+        }, TaskScheduler.Default);
+    }
+
+    /// <summary>
+    /// 等待当前所有后台重试调度任务收敛（测试辅助和 StopAsync 复用）。
+    /// </summary>
+    internal Task WaitForPendingRetriesAsync()
+    {
+        Task[] snapshot;
+        lock (_retryTasksLock)
+        {
+            snapshot = _retryTasks.ToArray();
+        }
+        return snapshot.Length == 0 ? Task.CompletedTask : Task.WhenAll(snapshot);
+    }
+
+    /// <summary>
+    /// 等待重试调度收敛，带超时上限。
+    /// </summary>
+    private async Task WaitForPendingRetriesInternalAsync(TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        Task[] snapshot;
+        lock (_retryTasksLock)
+        {
+            snapshot = _retryTasks.ToArray();
+        }
+
+        if (snapshot.Length == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await Task.WhenAny(Task.WhenAll(snapshot), Task.Delay(timeout, cancellationToken));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // 调用方取消，直接返回让 StopAsync 继续后续阶段
         }
     }
 

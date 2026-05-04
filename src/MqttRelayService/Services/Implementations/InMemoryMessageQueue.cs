@@ -59,16 +59,13 @@ public class InMemoryMessageQueue : IMessageQueue
 
             if (_options.DropWhenQueueFull)
             {
-                // 显式检查容量，避免静默丢弃
-                if (_channel.Reader.Count >= _options.QueueCapacity)
+                // Wait 模式下使用 TryWrite 同步判断：满载立即丢弃
+                // 不使用 BoundedChannelFullMode.DropWrite，因为它会静默吞消息并返回 true
+                if (!_channel.Writer.TryWrite(message))
                 {
                     _logger.LogWarning("队列已满，消息 {MessageId} 被丢弃", message.MessageId);
                     return false;
                 }
-
-                // 快速写入，使用短超时防止意外阻塞
-                using var timeoutCts = new CancellationTokenSource(50);
-                await _channel.Writer.WriteAsync(message, timeoutCts.Token);
             }
             else
             {

@@ -133,6 +133,9 @@ public class MessageDeliveryServiceTests
         var method = typeof(MessageDeliveryService).GetMethod("ProcessMessageAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
         await (Task)method!.Invoke(_service, new object[] { message, CancellationToken.None })!;
 
+        // 重试调度为非阻塞，等待后台任务收敛
+        await _service.WaitForPendingRetriesAsync();
+
         // 应触发重试入队
         _queueMock.Verify(q => q.EnqueueAsync(It.IsAny<ForwardMessage>(), It.IsAny<CancellationToken>()), Times.Once);
         Assert.Equal(1, message.RetryCount);
@@ -178,6 +181,9 @@ public class MessageDeliveryServiceTests
         var method = typeof(MessageDeliveryService).GetMethod("ProcessMessageAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
         await (Task)method!.Invoke(_service, new object[] { message, CancellationToken.None })!;
 
+        // 重试调度为非阻塞，等待后台任务收敛
+        await _service.WaitForPendingRetriesAsync();
+
         // 路由异常应触发重试
         _queueMock.Verify(q => q.EnqueueAsync(It.IsAny<ForwardMessage>(), It.IsAny<CancellationToken>()), Times.Once);
     }
@@ -195,13 +201,20 @@ public class MessageDeliveryServiceTests
 
         var method = typeof(MessageDeliveryService).GetMethod("HandleFailureAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
 
+        // HandleFailureAsync 应快速返回（只调度后台任务，不阻塞退避延迟）
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         await (Task)method!.Invoke(_service, new object[] { message, "test failure", CancellationToken.None })!;
         stopwatch.Stop();
 
-        // 验证实际等待了退避时间
-        Assert.True(stopwatch.ElapsedMilliseconds >= 80, $"Expected delay ~100ms, actual {stopwatch.ElapsedMilliseconds}ms");
+        Assert.True(stopwatch.ElapsedMilliseconds < 80,
+            $"期望非阻塞返回（<80ms），实际 {stopwatch.ElapsedMilliseconds}ms");
+
+        // 等待后台重试任务收敛（实际退避延迟在后台完成）
+        await _service.WaitForPendingRetriesAsync();
+
+        // 重试入队应在退避延迟后被调用一次
         _queueMock.Verify(q => q.EnqueueAsync(It.IsAny<ForwardMessage>(), It.IsAny<CancellationToken>()), Times.Once);
+        Assert.Equal(1, message.RetryCount);
     }
 
     [Fact]
@@ -390,31 +403,39 @@ public class MessageDeliveryServiceTests
     }
 
     [Fact]
-    public async Task HandleFailureAsync_CancelledDuringDelay_RethrowsOperationCanceledException()
+    public async Task HandleFailureAsync_CancelledDuringDelay_PreservesMessageWithoutIncrementingRetry()
     {
         var message = CreateTestMessage();
-        var delay = TimeSpan.FromMilliseconds(500);
+        var delay = TimeSpan.FromSeconds(2);
 
         _retryPolicyMock.Setup(rp => rp.GetDelayAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(delay);
+
+        // 取消时后台任务以 CancellationToken.None 重新入队保留消息
+        _queueMock.Setup(q => q.EnqueueAsync(It.IsAny<ForwardMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
 
         var method = typeof(MessageDeliveryService).GetMethod("HandleFailureAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
 
         using var cts = new CancellationTokenSource();
         var token = cts.Token;
 
-        // 在调用后 50ms 取消 token
-        _ = Task.Run(async () =>
-        {
-            await Task.Delay(50);
-            cts.Cancel();
-        });
+        // HandleFailureAsync 仅调度后台任务，本身应快速返回，不抛 OCE
+        await (Task)method!.Invoke(_service, new object[] { message, "test failure", token })!;
 
-        await Assert.ThrowsAsync<OperationCanceledException>(async () =>
-            await (Task)method!.Invoke(_service, new object[] { message, "test failure", token })!);
+        // 在退避延迟期间取消 token，触发后台任务的取消保留分支
+        cts.Cancel();
 
+        // 等待后台重试任务收敛（取消路径应快速结束）
+        await _service.WaitForPendingRetriesAsync();
+
+        // 取消期间延迟未完成，RetryCount 不应被推进
         Assert.Equal(0, message.RetryCount);
-        _queueMock.Verify(q => q.EnqueueAsync(It.IsAny<ForwardMessage>(), It.IsAny<CancellationToken>()), Times.Never);
+
+        // 后台任务应尝试以 CancellationToken.None 保留消息（再次入队）
+        _queueMock.Verify(q => q.EnqueueAsync(It.IsAny<ForwardMessage>(), It.IsAny<CancellationToken>()), Times.Once);
+
+        // 保留成功时不应写死信
         _deadLetterMock.Verify(d => d.WriteAsync(It.IsAny<DeadLetterRecord>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 

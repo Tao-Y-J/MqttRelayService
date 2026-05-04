@@ -19,6 +19,12 @@ public class RetryPolicyProvider : IRetryPolicyProvider
     }
 
     /// <summary>
+    /// 重试次数移位上限，防止 1L 左移 retryCount 位时溢出
+    /// （retryCount=30 配合默认 baseDelay=1000ms 已超 12 天，远超 RetryMaxDelayMs 的合理上界）
+    /// </summary>
+    private const int MaxShiftBits = 30;
+
+    /// <summary>
     /// 根据当前重试次数计算下次重试延迟
     /// </summary>
     public Task<TimeSpan> GetDelayAsync(int retryCount, CancellationToken cancellationToken = default)
@@ -30,11 +36,14 @@ public class RetryPolicyProvider : IRetryPolicyProvider
                 retryCount = 0;
             }
 
+            // 防御性截断，避免 1L << retryCount 在 retryCount 极大时溢出
+            var shiftBits = Math.Min(retryCount, MaxShiftBits);
+
             // 指数退避：delay = baseDelay * 2^retryCount
-            var delayMs = (long)_options.RetryBaseDelayMs * (1L << retryCount);
+            var delayMs = (long)_options.RetryBaseDelayMs * (1L << shiftBits);
 
             // 限制在最大延迟范围内
-            if (delayMs > _options.RetryMaxDelayMs)
+            if (delayMs <= 0 || delayMs > _options.RetryMaxDelayMs)
             {
                 delayMs = _options.RetryMaxDelayMs;
             }
