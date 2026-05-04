@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Options;
+﻿using Microsoft.Extensions.Options;
 using MqttRelayService.Models;
 using MqttRelayService.Options;
 using MqttRelayService.Services.Abstractions;
@@ -22,6 +22,7 @@ public class MessageDeliveryService : IMessageDeliveryService
     private readonly List<Task> _consumerTasks = new();
     private readonly object _retryTasksLock = new();
     private readonly HashSet<Task> _retryTasks = new();
+    private volatile bool _isStopping;
     private CancellationTokenSource? _cts;
 
     public MessageDeliveryService(
@@ -47,6 +48,14 @@ public class MessageDeliveryService : IMessageDeliveryService
     /// </summary>
     public Task StartAsync(CancellationToken cancellationToken = default)
     {
+        if (_cts != null || _consumerTasks.Count > 0)
+        {
+            _logger.LogWarning("消息投递服务已处于启动状态，忽略重复启动请求");
+            return Task.CompletedTask;
+        }
+
+        _isStopping = false;
+        LogDrainTimeoutConfigurationWarning();
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var handlerCount = Math.Max(1, _options.MaxConcurrentHandlers);
 
@@ -65,9 +74,11 @@ public class MessageDeliveryService : IMessageDeliveryService
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
         _logger.LogInformation("消息投递服务正在停止……");
+        _isStopping = true;
 
-        if (_consumerTasks.Count == 0)
+        if (_cts == null && _consumerTasks.Count == 0)
         {
+            _isStopping = false;
             return;
         }
 
@@ -76,9 +87,12 @@ public class MessageDeliveryService : IMessageDeliveryService
             // 阶段 1：取消消费循环的 ReadAllAsync，停止接收新消息
             _cts?.Cancel();
 
-            // 等待所有消费者退出
-            var allConsumersTask = Task.WhenAll(_consumerTasks);
-            await Task.WhenAny(allConsumersTask, Task.Delay(2000, cancellationToken));
+            if (_consumerTasks.Count > 0)
+            {
+                // 等待所有消费者退出
+                var allConsumersTask = Task.WhenAll(_consumerTasks);
+                await Task.WhenAny(allConsumersTask, Task.Delay(2000, cancellationToken));
+            }
 
             // 阶段 1.5：等待所有后台重试调度任务收敛
             // 取消信号下，这些任务会快速结束（进入"保留或死信"分支），无需等待真实的退避延迟
@@ -138,6 +152,10 @@ public class MessageDeliveryService : IMessageDeliveryService
         catch (Exception ex)
         {
             _logger.LogError(ex, "停止投递服务时发生异常");
+        }
+        finally
+        {
+            ResetLifecycleState();
         }
     }
 
@@ -333,9 +351,18 @@ public class MessageDeliveryService : IMessageDeliveryService
             _logger.LogWarning("消息 {MessageId} 第 {RetryCount} 次转发失败，{DelayMs}ms 后重试，原因：{Reason}",
                 message.RouteContext.MessageId, nextRetryCount, delay.TotalMilliseconds, reason);
 
-            // 非阻塞调度：消费者立即返回处理下一条消息；
-            // 实际的退避延迟和重新入队在后台任务中执行
-            ScheduleRetryEnqueue(message, delay, reason, cancellationToken);
+            if (_isStopping)
+            {
+                // 停机 drain 阶段需要等待当前消息的重试重新入队完成，
+                // 避免 drain 误把“已安排延迟重试”当成“已处理完成”而提前退出。
+                await DelayAndRequeueDuringStopAsync(message, nextRetryCount, delay, reason, cancellationToken);
+            }
+            else
+            {
+                // 运行期保持非阻塞调度：消费者立即返回处理下一条消息；
+                // 实际的退避延迟和重新入队在后台任务中执行。
+                ScheduleRetryEnqueue(message, nextRetryCount, delay, reason, cancellationToken);
+            }
         }
         else
         {
@@ -351,6 +378,7 @@ public class MessageDeliveryService : IMessageDeliveryService
     /// </summary>
     private void ScheduleRetryEnqueue(
         ForwardMessage message,
+        int retryCountAfterDelay,
         TimeSpan delay,
         string reason,
         CancellationToken cancellationToken)
@@ -362,9 +390,11 @@ public class MessageDeliveryService : IMessageDeliveryService
                 await Task.Delay(delay, cancellationToken);
 
                 // 延迟正常完成后才正式增加重试计数，保证取消场景下计数不被错误推进
-                message.RetryCount++;
+                message.RetryCount = retryCountAfterDelay;
 
-                var enqueued = await _queue.EnqueueAsync(message, cancellationToken);
+                // 延迟已经完成后，即使服务开始停机，也要尝试把消息保留回队列给 drain 阶段处理，
+                // 不能再把已取消的调用方 token 传给 EnqueueAsync 导致误入死信。
+                var enqueued = await _queue.EnqueueAsync(message, CancellationToken.None);
                 if (!enqueued)
                 {
                     _logger.LogError("消息 {MessageId} 重试入队失败，直接进入死信",
@@ -377,33 +407,7 @@ public class MessageDeliveryService : IMessageDeliveryService
                 // 服务停止取消重试调度；尝试将消息保留到队列让 drain 处理，失败则转入死信
                 _logger.LogInformation("消息 {MessageId} 重试调度因服务停止而中止，尝试保留",
                     message.RouteContext.MessageId);
-                try
-                {
-                    var preserved = await _queue.EnqueueAsync(message, CancellationToken.None);
-                    if (!preserved)
-                    {
-                        await MoveToDeadLetterAsync(
-                            message,
-                            "服务停止时取消重试调度：" + reason,
-                            CancellationToken.None);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "消息 {MessageId} 在重试调度取消时保留失败，转入死信",
-                        message.RouteContext.MessageId);
-                    try
-                    {
-                        await MoveToDeadLetterAsync(
-                            message,
-                            "服务停止时保留消息异常：" + reason,
-                            CancellationToken.None);
-                    }
-                    catch (Exception writeEx)
-                    {
-                        _logger.LogError(writeEx, "消息 {MessageId} 写入死信也失败", message.RouteContext.MessageId);
-                    }
-                }
+                await PreserveRetryMessageAsync(message, "服务停止时取消重试调度：" + reason);
             }
             catch (Exception ex)
             {
@@ -424,6 +428,69 @@ public class MessageDeliveryService : IMessageDeliveryService
         });
 
         TrackRetryTask(task);
+    }
+
+    /// <summary>
+    /// 停机 drain 阶段的重试：同步等待当前退避时间，再尝试重新入队，
+    /// 保证 drain 不会在消息重新出现之前提前结束。
+    /// </summary>
+    private async Task DelayAndRequeueDuringStopAsync(
+        ForwardMessage message,
+        int retryCountAfterDelay,
+        TimeSpan delay,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(delay, cancellationToken);
+
+            message.RetryCount = retryCountAfterDelay;
+
+            var enqueued = await _queue.EnqueueAsync(message, CancellationToken.None);
+            if (!enqueued)
+            {
+                _logger.LogError("消息 {MessageId} 在停止排空阶段重试入队失败，直接进入死信",
+                    message.RouteContext.MessageId);
+                await MoveToDeadLetterAsync(message, "停止排空阶段重试入队失败：" + reason, CancellationToken.None);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogInformation("消息 {MessageId} 在停止排空阶段取消重试等待，尝试保留",
+                message.RouteContext.MessageId);
+            await PreserveRetryMessageAsync(message, "停止排空阶段取消重试等待：" + reason);
+        }
+    }
+
+    /// <summary>
+    /// 停止过程中尽量把待重试消息保留回队列，失败再写入死信。
+    /// </summary>
+    private async Task PreserveRetryMessageAsync(ForwardMessage message, string reason)
+    {
+        try
+        {
+            var preserved = await _queue.EnqueueAsync(message, CancellationToken.None);
+            if (preserved)
+            {
+                return;
+            }
+
+            await MoveToDeadLetterAsync(message, reason, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "消息 {MessageId} 在停止过程中保留失败，转入死信",
+                message.RouteContext.MessageId);
+            try
+            {
+                await MoveToDeadLetterAsync(message, "服务停止时保留消息异常：" + reason, CancellationToken.None);
+            }
+            catch (Exception writeEx)
+            {
+                _logger.LogError(writeEx, "消息 {MessageId} 写入死信也失败", message.RouteContext.MessageId);
+            }
+        }
     }
 
     /// <summary>
@@ -483,6 +550,39 @@ public class MessageDeliveryService : IMessageDeliveryService
         {
             // 调用方取消，直接返回让 StopAsync 继续后续阶段
         }
+    }
+
+    /// <summary>
+    /// 启动时检查停机排空配置是否覆盖最大退避时间，避免停机时第一条失败消息还未等到下一次注入尝试就触发排空超时。
+    /// </summary>
+    private void LogDrainTimeoutConfigurationWarning()
+    {
+        if (_options.ShutdownDrainTimeoutMs >= _options.RetryMaxDelayMs)
+        {
+            return;
+        }
+
+        _logger.LogWarning(
+            "可靠性配置提示：ShutdownDrainTimeoutMs({ShutdownDrainTimeoutMs}ms) 小于 RetryMaxDelayMs({RetryMaxDelayMs}ms)。停机排空阶段若遇到失败消息，超时可能先于单次最大退避结束，消息会转入保留回队列或死信收敛，而不会完成当次下一次注入尝试。",
+            _options.ShutdownDrainTimeoutMs,
+            _options.RetryMaxDelayMs);
+    }
+
+    /// <summary>
+    /// 停止完成后清理生命周期状态，确保同一实例可以再次启动。
+    /// </summary>
+    private void ResetLifecycleState()
+    {
+        _cts?.Dispose();
+        _cts = null;
+        _consumerTasks.Clear();
+
+        lock (_retryTasksLock)
+        {
+            _retryTasks.RemoveWhere(static task => task.IsCompleted);
+        }
+
+        _isStopping = false;
     }
 
     /// <summary>

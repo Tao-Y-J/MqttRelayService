@@ -147,3 +147,15 @@ powershell -ExecutionPolicy Bypass -NoProfile -Command "& '%~dp0install-service.
 ### 6.8 Worker 停机先取消循环，再停止被监控对象
 
 如果后台 Worker 的监控循环会根据 `IsRunning=false` 触发重启，停机时必须先让监控循环退出，再停止被监控对象。反过来先停止 Broker 会让监控循环误判为异常停止并触发重启。
+
+### 6.9 停机排空超时必须覆盖最大退避时间
+
+`MessageDeliveryService` 在停机 drain 阶段遇到失败消息时，会同步等待该次退避结束后再尝试重新入队，等待使用 `ShutdownDrainTimeoutMs` 的取消 token。
+
+**结论**：
+- 如果希望停机阶段至少覆盖一次失败消息的最大退避等待，配置上必须保持 `ShutdownDrainTimeoutMs >= RetryMaxDelayMs`
+- 如果 `ShutdownDrainTimeoutMs < RetryMaxDelayMs`，停机超时会先触发，消息会进入“保留回队列或死信”的收敛分支，而不会完成当次下一次注入尝试
+
+### 6.10 可复用服务实例必须清理生命周期状态
+
+`MessageDeliveryService` 停止后必须释放 `_cts` 并清空 `_consumerTasks`，否则同一实例再次执行 `StartAsync -> StopAsync` 时会混入上一次运行的生命周期状态。

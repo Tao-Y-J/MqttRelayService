@@ -1,4 +1,4 @@
-# MqttRelayService
+﻿# MqttRelayService
 
 基于 `.NET 8 Worker Service + MQTTnet` 的单机 MQTT 消息转发服务。
 
@@ -132,10 +132,13 @@ Scripts\uninstall-service.cmd
 | **Reliability** | `MaxConcurrentHandlers` | 后台消费并发数（最小值为 1） |
 | **Reliability** | `MaxRetryCount` | 单条消息最大重试次数 |
 | **Reliability** | `RetryBaseDelayMs` | 重试退避基础延迟（毫秒） |
+| **Reliability** | `RetryMaxDelayMs` | 单次重试退避最大延迟（毫秒） |
 | **Reliability** | `ShutdownDrainTimeoutMs` | 停机时队列排空超时（毫秒） |
 | **Reliability** | `EnableDeadLetter` | 是否启用死信记录 |
 | **Reliability** | `DeadLetterPath` | 死信文件存储目录 |
 | **Serilog** | `RetentionDays` | 日志文件保留天数 |
+
+停机排空使用 `ShutdownDrainTimeoutMs` 作为总超时。当前实现中，停机 drain 阶段遇到失败消息时会同步等待该次退避结束后再尝试重新入队；如果希望停机阶段至少覆盖一次失败消息的最大退避等待，请保持 `ShutdownDrainTimeoutMs >= RetryMaxDelayMs`。当 `ShutdownDrainTimeoutMs` 更小，排空超时会先触发，消息将按当前逻辑保留回队列或转入死信收敛，不再继续当次下一次注入尝试。
 
 ## Topic 规范
 
@@ -168,6 +171,7 @@ Scripts\uninstall-service.cmd
 - 使用**内存队列**（`InMemoryMessageQueue`），进程异常退出或机器宕机时，未完成转发的内存消息会丢失
 - 死信记录写入本地 JSON 文件，不依赖外部存储
 - 未实现磁盘队列或消息持久化
+- 停机 drain 是否来得及覆盖一次失败消息的最大退避，取决于 `ShutdownDrainTimeoutMs` 是否不小于 `RetryMaxDelayMs`
 
 ## 当前不支持的能力
 
