@@ -1,4 +1,4 @@
-namespace MqttRelayService.Options;
+﻿namespace MqttRelayService.Options;
 
 /// <summary>
 /// 消息路由配置选项

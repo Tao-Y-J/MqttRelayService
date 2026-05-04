@@ -64,7 +64,7 @@ src/MqttRelayService/bin/Release/net8.0/win-x64/publish/
 Scripts\uninstall-service.cmd
 ```
 
-安装成功后，服务名称为 `MqttRelayService`，启动类型为 `Automatic`。可通过 Windows 服务管理器查看状态。
+安装成功后，服务名称默认使用 `appsettings.json` 中 `Service:Name` 的值（默认为 `MqttRelayService`），启动类型为 `Automatic`。可通过 Windows 服务管理器查看状态。修改 `Service:Name` 后需重新发布并执行安装脚本，脚本会自动读取配置中的名称。
 
 ## 配置说明
 

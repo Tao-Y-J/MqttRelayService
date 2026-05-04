@@ -1,4 +1,4 @@
-namespace MqttRelayService.Models;
+﻿namespace MqttRelayService.Models;
 
 /// <summary>
 /// 内部转发消息

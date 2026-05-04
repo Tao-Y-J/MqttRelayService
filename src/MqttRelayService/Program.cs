@@ -61,9 +61,12 @@ public class Program
             builder.Services.AddSingleton<IMessageDeliveryService, MessageDeliveryService>();
 
             // 注册后台服务
-            builder.Services.AddHostedService<BrokerWorker>();
+            // 注意：HostedService 的 StopAsync 按注册逆序执行。
+            // 为保证停机时 Broker 先停止接收消息、投递服务后停止排空队列，
+            // BrokerWorker 必须最后注册；启动时三个服务近乎并行，顺序不影响功能。
             builder.Services.AddHostedService<QueueMetricsWorker>();
             builder.Services.AddHostedService<DeliveryWorker>();
+            builder.Services.AddHostedService<BrokerWorker>();
 
             var host = builder.Build();
 

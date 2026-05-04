@@ -1,4 +1,4 @@
-namespace MqttRelayService.Models;
+﻿namespace MqttRelayService.Models;
 
 /// <summary>
 /// 连接状态枚举

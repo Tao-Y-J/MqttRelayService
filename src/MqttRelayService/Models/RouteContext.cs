@@ -1,4 +1,4 @@
-namespace MqttRelayService.Models;
+﻿namespace MqttRelayService.Models;
 
 /// <summary>
 /// 路由上下文，包含消息的基本信息

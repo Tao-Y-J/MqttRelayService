@@ -1,4 +1,4 @@
-namespace MqttRelayService.Options;
+﻿namespace MqttRelayService.Options;
 
 /// <summary>
 /// 认证用户配置

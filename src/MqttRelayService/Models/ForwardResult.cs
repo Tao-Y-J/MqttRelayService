@@ -1,4 +1,4 @@
-namespace MqttRelayService.Models;
+﻿namespace MqttRelayService.Models;
 
 /// <summary>
 /// 转发结果

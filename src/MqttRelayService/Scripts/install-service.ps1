@@ -12,7 +12,7 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
 
 $ErrorActionPreference = "Stop"
 
-$serviceName = "MqttRelayService"
+$defaultServiceName = "MqttRelayService"
 $displayName = "MQTT Relay Service"
 $description = "内部 MQTT 消息转发服务"
 
@@ -22,6 +22,21 @@ $baseDir = Split-Path -Parent $scriptDir
 $exePath = Join-Path $baseDir "MqttRelayService.exe"
 $configPath = Join-Path $baseDir "appsettings.json"
 $binaryPathName = "`"$exePath`""
+
+# 从 appsettings.json 读取服务名称，失败时回退到默认值
+$serviceName = $defaultServiceName
+if (Test-Path $configPath) {
+    try {
+        $config = Get-Content $configPath -Raw | ConvertFrom-Json
+        if ($config.Service -and $config.Service.Name) {
+            $serviceName = $config.Service.Name
+        }
+    } catch {
+        Write-Warning "读取 Service.Name 失败，使用默认名称 $defaultServiceName"
+    }
+} else {
+    Write-Warning "未找到配置文件，使用默认服务名称 $defaultServiceName"
+}
 
 Write-Host "[信息] 脚本目录: $scriptDir"
 Write-Host "[信息] 服务目录: $baseDir"

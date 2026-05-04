@@ -1,4 +1,4 @@
-namespace MqttRelayService.Services.Abstractions;
+﻿namespace MqttRelayService.Services.Abstractions;
 
 /// <summary>
 /// 重试策略提供器接口，提供指数退避等重试间隔计算

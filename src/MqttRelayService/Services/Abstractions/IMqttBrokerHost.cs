@@ -1,4 +1,4 @@
-namespace MqttRelayService.Services.Abstractions;
+﻿namespace MqttRelayService.Services.Abstractions;
 
 /// <summary>
 /// MQTT Broker 宿主接口，负责 MQTT Server 的启停管理

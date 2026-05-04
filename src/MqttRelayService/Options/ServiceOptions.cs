@@ -1,4 +1,4 @@
-namespace MqttRelayService.Options;
+﻿namespace MqttRelayService.Options;
 
 /// <summary>
 /// 服务基本配置选项

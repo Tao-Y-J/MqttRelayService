@@ -1,4 +1,4 @@
-namespace MqttRelayService.Options;
+﻿namespace MqttRelayService.Options;
 
 /// <summary>
 /// MQTT Broker 配置选项

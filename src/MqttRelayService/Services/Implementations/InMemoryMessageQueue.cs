@@ -1,4 +1,4 @@
-using System.Threading.Channels;
+﻿using System.Threading.Channels;
 using Microsoft.Extensions.Options;
 using MqttRelayService.Models;
 using MqttRelayService.Options;

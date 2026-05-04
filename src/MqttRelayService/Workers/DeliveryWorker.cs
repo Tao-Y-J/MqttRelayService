@@ -1,4 +1,4 @@
-using MqttRelayService.Services.Abstractions;
+﻿using MqttRelayService.Services.Abstractions;
 
 namespace MqttRelayService.Workers;
 

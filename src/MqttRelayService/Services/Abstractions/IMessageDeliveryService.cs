@@ -1,4 +1,4 @@
-namespace MqttRelayService.Services.Abstractions;
+﻿namespace MqttRelayService.Services.Abstractions;
 
 /// <summary>
 /// 消息投递服务接口，负责消费队列并执行转发

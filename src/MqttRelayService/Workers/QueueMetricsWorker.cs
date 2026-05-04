@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using MqttRelayService.Services.Abstractions;
 
 namespace MqttRelayService.Workers;

@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using Moq;
 using MqttRelayService.Services.Abstractions;
 using MqttRelayService.Workers;
