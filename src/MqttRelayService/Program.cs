@@ -38,8 +38,9 @@ public class Program
             builder.Services.Configure<HostOptions>(options =>
             {
                 options.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore;
-                options.ShutdownTimeout = TimeSpan.FromMilliseconds(
-                    builder.Configuration.GetValue("Reliability:ShutdownDrainTimeoutMs", 30000));
+                // Host 停机超时需覆盖完整停机预算：消费者等待(2s) + 重试收敛(2s) + 排空超时 + 余量
+                var shutdownDrainTimeoutMs = builder.Configuration.GetValue("Reliability:ShutdownDrainTimeoutMs", 30000);
+                options.ShutdownTimeout = TimeSpan.FromMilliseconds(shutdownDrainTimeoutMs + 5000);
             });
 
             // 注册配置选项

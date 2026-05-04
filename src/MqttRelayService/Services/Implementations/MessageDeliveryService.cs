@@ -56,6 +56,20 @@ public class MessageDeliveryService : IMessageDeliveryService
         var handlerCount = 0;
         var shouldLogDrainTimeoutWarning = false;
 
+        // 检查是否有未完成的重试调度任务，防止旧周期任务跨生命周期入队
+        Task[] pendingRetries;
+        lock (_retryTasksLock)
+        {
+            pendingRetries = _retryTasks.Where(t => !t.IsCompleted).ToArray();
+        }
+
+        if (pendingRetries.Length > 0)
+        {
+            _logger.LogError("消息投递服务上一次停止后仍有 {RetryCount} 个重试调度未结束，拒绝重新启动",
+                pendingRetries.Length);
+            return Task.CompletedTask;
+        }
+
         lock (_lifecycleLock)
         {
             _consumerTasks.RemoveAll(static task => task.IsCompleted);
@@ -136,7 +150,8 @@ public class MessageDeliveryService : IMessageDeliveryService
 
             // 阶段 2：排空队列中剩余的消息
             var drainTimeout = TimeSpan.FromMilliseconds(_options.ShutdownDrainTimeoutMs);
-            using var drainCts = new CancellationTokenSource(drainTimeout);
+            using var drainTimeoutCts = new CancellationTokenSource(drainTimeout);
+            using var drainCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, drainTimeoutCts.Token);
 
             var drainedCount = 0;
             while (!drainCts.Token.IsCancellationRequested)

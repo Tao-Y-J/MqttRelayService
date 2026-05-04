@@ -48,9 +48,9 @@ public class RetryPolicyProvider : IRetryPolicyProvider
                 delayMs = _options.RetryMaxDelayMs;
             }
 
-            // 添加少量随机抖动（0-20%）避免惊群
+            // 添加少量随机抖动（0-20%）避免惊群，抖动后再次 clamp 保证硬上限
             var jitter = Random.Shared.NextDouble() * 0.2 * delayMs;
-            delayMs += (long)jitter;
+            delayMs = Math.Min(delayMs + (long)jitter, _options.RetryMaxDelayMs);
 
             _logger.LogDebug("重试延迟计算：第 {RetryCount} 次，延迟 {DelayMs}ms", retryCount, delayMs);
             return Task.FromResult(TimeSpan.FromMilliseconds(delayMs));
