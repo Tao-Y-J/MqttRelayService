@@ -132,7 +132,7 @@ Scripts\uninstall-service.cmd
 | **Reliability** | `QueueCapacity` | 内部转发队列容量上限 |
 | **Reliability** | `MaxConcurrentHandlers` | 后台消费并发数（最小值为 1） |
 | **Reliability** | `MaxRetryCount` | 单条消息最大重试次数 |
-| **Reliability** | `MaxPendingRetryTasks` | 运行期等待退避的后台重试调度任务上限，超限消息进入死信 |
+| **Reliability** | `MaxPendingRetryTasks` | 运行期等待退避的后台重试调度任务上限，建议不大于 `QueueCapacity`，超限消息进入死信 |
 | **Reliability** | `RetryBaseDelayMs` | 重试退避基础延迟（毫秒） |
 | **Reliability** | `RetryMaxDelayMs` | 单次重试退避最大延迟（毫秒） |
 | **Reliability** | `ShutdownDrainTimeoutMs` | 停机时队列排空超时（毫秒） |

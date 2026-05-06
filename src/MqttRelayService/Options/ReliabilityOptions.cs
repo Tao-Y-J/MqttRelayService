@@ -32,6 +32,7 @@ public class ReliabilityOptions
 
     /// <summary>
     /// 运行期等待退避的后台重试调度任务上限，防止失败洪峰绕过内部队列容量造成无界内存增长。
+    /// 建议不大于 QueueCapacity；配置值小于 1 时运行期会回退到 QueueCapacity。
     /// </summary>
     public int MaxPendingRetryTasks { get; set; } = 1000;
 
