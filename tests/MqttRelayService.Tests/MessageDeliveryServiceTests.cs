@@ -218,6 +218,60 @@ public class MessageDeliveryServiceTests
     }
 
     [Fact]
+    public async Task HandleFailureAsync_PendingRetryLimitExceeded_MovesToDeadLetter()
+    {
+        var firstMessage = CreateTestMessage();
+        var secondMessage = CreateTestMessage();
+        secondMessage.MessageId = "msg-2";
+        secondMessage.RouteContext.MessageId = "msg-2";
+
+        var retryPolicyMock = new Mock<IRetryPolicyProvider>();
+        var queueMock = new Mock<IMessageQueue>();
+        var deadLetterMock = new Mock<IDeadLetterService>();
+
+        retryPolicyMock.Setup(rp => rp.GetDelayAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(TimeSpan.FromSeconds(30));
+        queueMock.Setup(q => q.EnqueueAsync(It.IsAny<ForwardMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        deadLetterMock.Setup(d => d.WriteAsync(It.IsAny<DeadLetterRecord>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        var service = new MessageDeliveryService(
+            queueMock.Object,
+            new Mock<IMessageRouter>().Object,
+            new Mock<IMqttBrokerHost>().Object,
+            deadLetterMock.Object,
+            retryPolicyMock.Object,
+            Microsoft.Extensions.Options.Options.Create(new ReliabilityOptions
+            {
+                QueueCapacity = 10,
+                MaxRetryCount = 3,
+                MaxPendingRetryTasks = 1,
+                RetryBaseDelayMs = 10,
+                RetryMaxDelayMs = 100,
+                ForwardTimeoutMs = 5000,
+                ShutdownDrainTimeoutMs = 2000,
+                DropWhenQueueFull = false
+            }),
+            new Mock<ILogger<MessageDeliveryService>>().Object);
+
+        var method = typeof(MessageDeliveryService).GetMethod("HandleFailureAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+        using var cts = new CancellationTokenSource();
+        await (Task)method!.Invoke(service, new object[] { firstMessage, "first failure", cts.Token })!;
+        await (Task)method.Invoke(service, new object[] { secondMessage, "second failure", cts.Token })!;
+
+        deadLetterMock.Verify(d => d.WriteAsync(
+            It.Is<DeadLetterRecord>(record => record.MessageId == "msg-2"),
+            It.IsAny<CancellationToken>()),
+            Times.Once);
+        Assert.Equal(MessageProcessStatus.DeadLetter, secondMessage.Status);
+
+        cts.Cancel();
+        await service.WaitForPendingRetriesAsync();
+    }
+
+    [Fact]
     public async Task StopAsync_DrainsRemainingMessages()
     {
         var message = CreateTestMessage();

@@ -31,6 +31,11 @@ public class ReliabilityOptions
     public int MaxRetryCount { get; set; } = 3;
 
     /// <summary>
+    /// 运行期等待退避的后台重试调度任务上限，防止失败洪峰绕过内部队列容量造成无界内存增长。
+    /// </summary>
+    public int MaxPendingRetryTasks { get; set; } = 1000;
+
+    /// <summary>
     /// 重试基础延迟（毫秒）
     /// </summary>
     public int RetryBaseDelayMs { get; set; } = 1000;

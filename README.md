@@ -100,6 +100,7 @@ Scripts\uninstall-service.cmd
     "EnqueueTimeoutMs": 2000,
     "MaxConcurrentHandlers": 1,
     "MaxRetryCount": 3,
+    "MaxPendingRetryTasks": 1000,
     "RetryBaseDelayMs": 1000,
     "RetryMaxDelayMs": 30000,
     "EnableDeadLetter": true,
@@ -131,6 +132,7 @@ Scripts\uninstall-service.cmd
 | **Reliability** | `QueueCapacity` | 内部转发队列容量上限 |
 | **Reliability** | `MaxConcurrentHandlers` | 后台消费并发数（最小值为 1） |
 | **Reliability** | `MaxRetryCount` | 单条消息最大重试次数 |
+| **Reliability** | `MaxPendingRetryTasks` | 运行期等待退避的后台重试调度任务上限，超限消息进入死信 |
 | **Reliability** | `RetryBaseDelayMs` | 重试退避基础延迟（毫秒） |
 | **Reliability** | `RetryMaxDelayMs` | 单次重试退避最大延迟（毫秒） |
 | **Reliability** | `ShutdownDrainTimeoutMs` | 停机时队列排空超时（毫秒） |
@@ -164,6 +166,7 @@ Scripts\uninstall-service.cmd
 
 - **至少一次（At-Least-Once）**：消息转发失败后会自动重试，最多 `MaxRetryCount` 次
 - **有界队列**：内部队列有容量上限，满时根据配置选择等待或丢弃
+- **有界重试调度**：运行期等待退避的后台重试调度任务受 `MaxPendingRetryTasks` 限制，超限消息直接进入死信
 - **异常隔离**：单条消息处理失败不会导致消费者退出或其他消息受影响
 - **优雅停机**：收到停止信号后，先在超时内排空队列中剩余消息再退出
 

@@ -159,3 +159,9 @@ powershell -ExecutionPolicy Bypass -NoProfile -Command "& '%~dp0install-service.
 ### 6.10 可复用服务实例必须区分“已退出消费者”和“悬挂消费者”
 
 `MessageDeliveryService` 停止后必须释放 `_cts`，并且只移除已经完成的 `_consumerTasks`。如果仍有未响应取消的消费者，必须保留任务引用并拒绝再次启动；否则同一实例再次执行 `StartAsync -> StopAsync` 时，会与上一轮悬挂消费者并存，突破 `MaxConcurrentHandlers`，并在“已停止”状态下继续处理消息。
+
+### 6.11 运行期后台重试调度必须有容量上限
+
+运行期非阻塞重试会让失败消息暂时离开内部队列，由后台调度任务持有退避等待。该调度层必须有独立容量上限，否则 Broker 注入持续失败时会绕过 `QueueCapacity` 形成无界内存增长。
+
+**解决**：`MessageDeliveryService` 使用 `ReliabilityOptions.MaxPendingRetryTasks` 限制后台重试调度任务数量。达到上限时，新失败消息直接进入死信。

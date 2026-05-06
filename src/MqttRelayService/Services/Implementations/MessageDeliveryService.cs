@@ -422,7 +422,7 @@ public class MessageDeliveryService : IMessageDeliveryService
             {
                 // 运行期保持非阻塞调度：消费者立即返回处理下一条消息；
                 // 实际的退避延迟和重新入队在后台任务中执行。
-                ScheduleRetryEnqueue(message, nextRetryCount, delay, reason, cancellationToken);
+                await ScheduleRetryEnqueueAsync(message, nextRetryCount, delay, reason, cancellationToken);
             }
         }
         else
@@ -437,14 +437,14 @@ public class MessageDeliveryService : IMessageDeliveryService
     /// 后台延迟+入队任务的调度，非阻塞地完成退避重试，
     /// 取消时尝试将消息保留到队列（让 drain 阶段处理），失败则转入死信。
     /// </summary>
-    private void ScheduleRetryEnqueue(
+    private async Task ScheduleRetryEnqueueAsync(
         ForwardMessage message,
         int retryCountAfterDelay,
         TimeSpan delay,
         string reason,
         CancellationToken cancellationToken)
     {
-        var task = Task.Run(async () =>
+        var scheduled = TryTrackRetryTask(async () =>
         {
             try
             {
@@ -488,7 +488,14 @@ public class MessageDeliveryService : IMessageDeliveryService
             }
         });
 
-        TrackRetryTask(task);
+        if (!scheduled)
+        {
+            _logger.LogError(
+                "消息 {MessageId} 重试调度超出上限 {MaxPendingRetryTasks}，直接进入死信",
+                message.RouteContext.MessageId,
+                GetMaxPendingRetryTasks());
+            await MoveToDeadLetterAsync(message, "重试调度超出上限：" + reason, CancellationToken.None);
+        }
     }
 
     /// <summary>
@@ -555,12 +562,20 @@ public class MessageDeliveryService : IMessageDeliveryService
     }
 
     /// <summary>
-    /// 跟踪后台重试调度任务，任务完成后自动从集合中移除，避免长期运行场景下的引用堆积。
+    /// 在后台重试调度容量内启动并跟踪任务，任务完成后自动从集合中移除，避免长期运行场景下的引用堆积。
     /// </summary>
-    private void TrackRetryTask(Task task)
+    private bool TryTrackRetryTask(Func<Task> taskFactory)
     {
+        Task task;
         lock (_retryTasksLock)
         {
+            _retryTasks.RemoveWhere(static task => task.IsCompleted);
+            if (_retryTasks.Count >= GetMaxPendingRetryTasks())
+            {
+                return false;
+            }
+
+            task = Task.Run(taskFactory);
             _retryTasks.Add(task);
         }
 
@@ -572,6 +587,8 @@ public class MessageDeliveryService : IMessageDeliveryService
                 _retryTasks.Remove(t);
             }
         }, TaskScheduler.Default);
+
+        return true;
     }
 
     /// <summary>
@@ -621,6 +638,16 @@ public class MessageDeliveryService : IMessageDeliveryService
     private bool ShouldLogDrainTimeoutConfigurationWarning()
     {
         return _options.ShutdownDrainTimeoutMs < _options.RetryMaxDelayMs;
+    }
+
+    /// <summary>
+    /// 获取运行期后台重试调度任务上限，配置值小于 1 时回退到队列容量，仍保持有界。
+    /// </summary>
+    private int GetMaxPendingRetryTasks()
+    {
+        return _options.MaxPendingRetryTasks > 0
+            ? _options.MaxPendingRetryTasks
+            : Math.Max(1, _options.QueueCapacity);
     }
 
     /// <summary>
