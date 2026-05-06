@@ -55,4 +55,15 @@ public class DeliveryWorkerTests
 
         _deliveryServiceMock.Verify(d => d.StopAsync(It.IsAny<CancellationToken>()), Times.Once);
     }
+
+    [Fact]
+    public async Task StartAsync_WhenDeliveryServiceStartFails_PropagatesException()
+    {
+        _deliveryServiceMock.Setup(d => d.StartAsync(It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("startup blocked"));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => _worker.StartAsync(CancellationToken.None));
+
+        Assert.Equal("startup blocked", exception.Message);
+    }
 }

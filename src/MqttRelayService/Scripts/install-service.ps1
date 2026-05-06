@@ -23,6 +23,37 @@ $exePath = Join-Path $baseDir "MqttRelayService.exe"
 $configPath = Join-Path $baseDir "appsettings.json"
 $binaryPathName = "`"$exePath`""
 
+function Get-RelayServiceNamesForCurrentDeployment {
+    param(
+        [string]$ExpectedServiceName,
+        [string]$FallbackServiceName,
+        [string]$ExecutablePath
+    )
+
+    $serviceNames = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in @($ExpectedServiceName, $FallbackServiceName)) {
+        if (-not [string]::IsNullOrWhiteSpace($name)) {
+            $null = $serviceNames.Add($name)
+        }
+    }
+
+    try {
+        $servicesByPath = Get-CimInstance Win32_Service -ErrorAction Stop | Where-Object {
+            $pathName = $_.PathName
+            -not [string]::IsNullOrWhiteSpace($pathName) -and
+                $pathName.IndexOf($ExecutablePath, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+        }
+
+        foreach ($service in $servicesByPath) {
+            $null = $serviceNames.Add($service.Name)
+        }
+    } catch {
+        Write-Warning "按可执行路径探测已安装服务失败: $_"
+    }
+
+    return @($serviceNames)
+}
+
 # 从 appsettings.json 读取服务名称，失败时回退到默认值
 $serviceName = $defaultServiceName
 if (Test-Path $configPath) {
@@ -86,11 +117,27 @@ if ($ipList.Count -gt 0) {
 
 Write-Host ""
 
-# 检查服务是否已存在
-$existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-if ($existingService) {
-    Write-Warning "服务 '$serviceName' 已存在，先执行卸载..."
-    & "$scriptDir\uninstall-service.ps1"
+# 检查当前部署目录下是否已存在同一路径或旧名称的服务，先清理避免改名后遗留旧服务
+$existingServiceNames = @(Get-RelayServiceNamesForCurrentDeployment `
+    -ExpectedServiceName $serviceName `
+    -FallbackServiceName $defaultServiceName `
+    -ExecutablePath $exePath)
+$existingServices = @(
+    foreach ($existingServiceName in $existingServiceNames) {
+        $existingService = Get-Service -Name $existingServiceName -ErrorAction SilentlyContinue
+        if ($existingService) {
+            $existingService
+        }
+    }
+)
+
+if ($existingServices.Count -gt 0) {
+    Write-Warning "发现当前部署对应的已安装服务，先执行卸载："
+    foreach ($existingService in $existingServices) {
+        Write-Host "         - $($existingService.Name)"
+    }
+
+    & "$scriptDir\uninstall-service.ps1" -ServiceNames $existingServices.Name
     Write-Host ""
 }
 

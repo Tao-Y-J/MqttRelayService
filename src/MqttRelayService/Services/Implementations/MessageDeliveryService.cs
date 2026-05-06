@@ -65,9 +65,7 @@ public class MessageDeliveryService : IMessageDeliveryService
 
         if (pendingRetries.Length > 0)
         {
-            _logger.LogError("消息投递服务上一次停止后仍有 {RetryCount} 个重试调度未结束，拒绝重新启动",
-                pendingRetries.Length);
-            return Task.CompletedTask;
+            ThrowStartupBlocked($"消息投递服务上一次停止后仍有 {pendingRetries.Length} 个重试调度未结束，拒绝重新启动");
         }
 
         lock (_lifecycleLock)
@@ -82,9 +80,7 @@ public class MessageDeliveryService : IMessageDeliveryService
 
             if (_consumerTasks.Count > 0)
             {
-                _logger.LogError("消息投递服务上一次停止后仍有 {ConsumerCount} 个消费者未退出，拒绝重新启动",
-                    _consumerTasks.Count);
-                return Task.CompletedTask;
+                ThrowStartupBlocked($"消息投递服务上一次停止后仍有 {_consumerTasks.Count} 个消费者未退出，拒绝重新启动");
             }
 
             _isStopping = false;
@@ -659,6 +655,15 @@ public class MessageDeliveryService : IMessageDeliveryService
             "可靠性配置提示：ShutdownDrainTimeoutMs({ShutdownDrainTimeoutMs}ms) 小于 RetryMaxDelayMs({RetryMaxDelayMs}ms)。停机排空阶段若遇到失败消息，超时可能先于单次最大退避结束，消息会转入保留回队列或死信收敛，而不会完成当次下一次注入尝试。",
             _options.ShutdownDrainTimeoutMs,
             _options.RetryMaxDelayMs);
+    }
+
+    /// <summary>
+    /// 启动前发现上一次生命周期仍有残留时，记录错误并显式失败，避免 Host 假存活。
+    /// </summary>
+    private void ThrowStartupBlocked(string message)
+    {
+        _logger.LogError(message);
+        throw new InvalidOperationException(message);
     }
 
     /// <summary>

@@ -1039,7 +1039,7 @@ public class MessageDeliveryServiceTests
     }
 
     [Fact]
-    public async Task StartAsync_WhenPreviousConsumerStillRunning_RefusesRestart()
+    public async Task StartAsync_WhenPreviousConsumerStillRunning_ThrowsInvalidOperationException()
     {
         var message = CreateTestMessage();
         var queue = new InMemoryMessageQueue(
@@ -1058,26 +1058,9 @@ public class MessageDeliveryServiceTests
             new Mock<ILogger<InMemoryMessageQueue>>().Object);
         var routerMock = new Mock<IMessageRouter>();
         var brokerHostMock = new Mock<IMqttBrokerHost>();
-        var logMessages = new List<string>();
         var loggerMock = new Mock<ILogger<MessageDeliveryService>>();
         var publishStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var allowPublishToFinish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        loggerMock.Setup(x => x.Log(
-                It.IsAny<LogLevel>(),
-                It.IsAny<EventId>(),
-                It.Is<It.IsAnyType>((o, t) => true),
-                It.IsAny<Exception?>(),
-                It.IsAny<Func<It.IsAnyType, Exception?, string>>()))
-            .Callback(new InvocationAction(i =>
-            {
-                var formatter = i.Arguments[4] as Delegate;
-                var msg = formatter?.DynamicInvoke(i.Arguments[2], i.Arguments[3])?.ToString();
-                if (msg != null)
-                {
-                    logMessages.Add(msg);
-                }
-            }));
 
         routerMock.Setup(r => r.RouteAsync(It.IsAny<RouteContext>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new List<ForwardResult> { new() { TargetClientId = "client-2", Success = true } });
@@ -1114,13 +1097,37 @@ public class MessageDeliveryServiceTests
         await publishStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
 
         await service.StopAsync(CancellationToken.None);
-        await service.StartAsync(CancellationToken.None);
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => service.StartAsync(CancellationToken.None));
 
-        Assert.Contains(logMessages, msg => msg.Contains("拒绝重新启动", StringComparison.Ordinal));
+        Assert.Contains("拒绝重新启动", exception.Message, StringComparison.Ordinal);
 
         allowPublishToFinish.TrySetResult();
         await Task.Delay(100);
         await service.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task StartAsync_WhenPreviousRetrySchedulerStillRunning_ThrowsInvalidOperationException()
+    {
+        var message = CreateTestMessage();
+
+        _retryPolicyMock.Setup(rp => rp.GetDelayAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(TimeSpan.FromSeconds(30));
+        _queueMock.Setup(q => q.EnqueueAsync(It.IsAny<ForwardMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+
+        var handleFailureMethod = typeof(MessageDeliveryService).GetMethod("HandleFailureAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(handleFailureMethod);
+
+        using var cts = new CancellationTokenSource();
+        await (Task)handleFailureMethod!.Invoke(_service, new object[] { message, "test failure", cts.Token })!;
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => _service.StartAsync(CancellationToken.None));
+
+        Assert.Contains("重试调度未结束", exception.Message, StringComparison.Ordinal);
+
+        cts.Cancel();
+        await _service.WaitForPendingRetriesAsync();
     }
 
     #endregion
