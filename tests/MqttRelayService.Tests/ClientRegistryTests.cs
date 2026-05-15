@@ -42,15 +42,47 @@ public class ClientRegistryTests
         var session = new ClientSessionInfo
         {
             ClientId = "client-1",
+            ConnectionId = "conn-1",
             Username = "user1",
             ConnectedAt = DateTime.UtcNow,
             Status = ConnectionStatus.Connected
         };
 
         await _registry.RegisterAsync(session);
-        await _registry.UnregisterAsync("client-1");
+        await _registry.UnregisterAsync("client-1", "conn-1");
 
         Assert.Equal(0, _registry.Count);
+    }
+
+    [Fact]
+    public async Task UnregisterAsync_StaleConnection_DoesNotRemoveReconnectedClient()
+    {
+        var oldSession = new ClientSessionInfo
+        {
+            ClientId = "client-1",
+            ConnectionId = "conn-old",
+            Username = "user1",
+            ConnectedAt = DateTime.UtcNow,
+            Status = ConnectionStatus.Connected
+        };
+        var newSession = new ClientSessionInfo
+        {
+            ClientId = "client-1",
+            ConnectionId = "conn-new",
+            Username = "user1",
+            ConnectedAt = DateTime.UtcNow.AddSeconds(1),
+            Status = ConnectionStatus.Connected
+        };
+
+        await _registry.RegisterAsync(oldSession);
+        await _registry.RegisterAsync(newSession);
+        await _registry.UnregisterAsync("client-1", "conn-old");
+
+        var result = await _registry.GetSessionAsync("client-1");
+        Assert.Equal(1, _registry.Count);
+        Assert.NotNull(result);
+        Assert.Equal("conn-new", result!.ConnectionId);
+        Assert.Equal(ConnectionStatus.Connected, result.Status);
     }
 
     [Fact]
@@ -59,6 +91,7 @@ public class ClientRegistryTests
         var session = new ClientSessionInfo
         {
             ClientId = "client-1",
+            ConnectionId = "conn-1",
             Username = "user1",
             ConnectedAt = DateTime.UtcNow,
             Status = ConnectionStatus.Connected
@@ -69,6 +102,7 @@ public class ClientRegistryTests
 
         Assert.NotNull(result);
         Assert.Equal("client-1", result!.ClientId);
+        Assert.Equal("conn-1", result.ConnectionId);
     }
 
     [Fact]

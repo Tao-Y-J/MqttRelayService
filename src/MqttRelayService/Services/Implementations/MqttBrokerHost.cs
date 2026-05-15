@@ -19,6 +19,7 @@ public class MqttBrokerHost : IMqttBrokerHost, IDisposable
 {
     private const string SourceClientIdUserPropertyName = "x-source-client-id";
     private const string RelayMessageIdUserPropertyName = "x-relay-message-id";
+    private const string ConnectionIdSessionItemKey = "mqtt-relay-connection-id";
 
     private readonly IAuthService _authService;
     private readonly IClientRegistry _clientRegistry;
@@ -365,9 +366,13 @@ public class MqttBrokerHost : IMqttBrokerHost, IDisposable
     {
         try
         {
+            var connectionId = Guid.NewGuid().ToString("N");
+            e.SessionItems[ConnectionIdSessionItemKey] = connectionId;
+
             var session = new ClientSessionInfo
             {
                 ClientId = e.ClientId,
+                ConnectionId = connectionId,
                 Username = e.UserName ?? string.Empty,
                 ConnectedAt = DateTime.UtcNow,
                 LastActivityAt = DateTime.UtcNow,
@@ -391,7 +396,11 @@ public class MqttBrokerHost : IMqttBrokerHost, IDisposable
     {
         try
         {
-            await _clientRegistry.UnregisterAsync(e.ClientId);
+            var connectionId = e.SessionItems.Contains(ConnectionIdSessionItemKey)
+                ? e.SessionItems[ConnectionIdSessionItemKey] as string
+                : null;
+
+            await _clientRegistry.UnregisterAsync(e.ClientId, connectionId);
             _logger.LogInformation("客户端 {ClientId} 已断开，原因 {Reason}，当前在线数 {Count}",
                 e.ClientId, e.DisconnectType, _clientRegistry.Count);
         }

@@ -15,7 +15,7 @@ public interface IClientRegistry
     /// <summary>
     /// 注销客户端连接
     /// </summary>
-    Task UnregisterAsync(string clientId, CancellationToken cancellationToken = default);
+    Task UnregisterAsync(string clientId, string? connectionId = null, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// 获取指定客户端会话

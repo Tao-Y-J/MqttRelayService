@@ -650,7 +650,7 @@ public class MqttBrokerIntegrationTests
 
         public Task RegisterAsync(ClientSessionInfo session, CancellationToken cancellationToken = default) => Task.CompletedTask;
 
-        public Task UnregisterAsync(string clientId, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task UnregisterAsync(string clientId, string? connectionId = null, CancellationToken cancellationToken = default) => Task.CompletedTask;
 
         public Task<ClientSessionInfo?> GetSessionAsync(string clientId, CancellationToken cancellationToken = default) => Task.FromResult<ClientSessionInfo?>(null);
 

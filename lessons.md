@@ -165,3 +165,9 @@ powershell -ExecutionPolicy Bypass -NoProfile -Command "& '%~dp0install-service.
 运行期非阻塞重试会让失败消息暂时离开内部队列，由后台调度任务持有退避等待。该调度层必须有独立容量上限，否则 Broker 注入持续失败时会绕过 `QueueCapacity` 形成无界内存增长。
 
 **解决**：`MessageDeliveryService` 使用 `ReliabilityOptions.MaxPendingRetryTasks` 限制后台重试调度任务数量。达到上限时，新失败消息直接进入死信。
+
+### 6.12 同 ClientId 重连必须区分连接实例
+
+MQTT 客户端在网络抖动或自动重连时可能使用相同 `ClientId` 建立新连接。注册表不能只按 `ClientId` 处理断开事件，否则旧连接的延迟断开事件会误删新连接，表现为客户端在线但订阅路由丢失。
+
+**解决**：`MqttBrokerHost` 在连接事件中生成 `ConnectionId` 并写入 MQTTnet `SessionItems`，断开事件带回该值；`ClientRegistry.UnregisterAsync` 只移除与当前 `ConnectionId` 匹配的会话，过期断开事件只记录 Warning 并忽略。

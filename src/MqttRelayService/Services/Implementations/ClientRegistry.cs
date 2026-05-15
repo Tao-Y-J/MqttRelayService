@@ -44,10 +44,19 @@ public class ClientRegistry : IClientRegistry
     /// <summary>
     /// 注销客户端连接
     /// </summary>
-    public Task UnregisterAsync(string clientId, CancellationToken cancellationToken = default)
+    public Task UnregisterAsync(string clientId, string? connectionId = null, CancellationToken cancellationToken = default)
     {
         try
         {
+            if (_sessions.TryGetValue(clientId, out var session)
+                && !string.IsNullOrEmpty(connectionId)
+                && !string.Equals(session.ConnectionId, connectionId, StringComparison.Ordinal))
+            {
+                _logger.LogWarning("忽略客户端 {ClientId} 的过期断开事件，事件连接 {EventConnectionId}，当前连接 {CurrentConnectionId}",
+                    clientId, connectionId, session.ConnectionId);
+                return Task.CompletedTask;
+            }
+
             if (_sessions.TryRemove(clientId, out _))
             {
                 _logger.LogInformation("客户端 {ClientId} 已从在线客户端表移除，当前在线数 {Count}",
@@ -138,6 +147,7 @@ public class ClientRegistry : IClientRegistry
             return new ClientSessionInfo
             {
                 ClientId = session.ClientId,
+                ConnectionId = session.ConnectionId,
                 Username = session.Username,
                 ConnectedAt = session.ConnectedAt,
                 LastActivityAt = session.LastActivityAt,

@@ -11,6 +11,11 @@ public class ClientSessionInfo
     public string ClientId { get; set; } = string.Empty;
 
     /// <summary>
+    /// 本次连接实例标识，用于避免旧断开事件误删同 ClientId 的新连接
+    /// </summary>
+    public string ConnectionId { get; set; } = string.Empty;
+
+    /// <summary>
     /// 用户名
     /// </summary>
     public string Username { get; set; } = string.Empty;
