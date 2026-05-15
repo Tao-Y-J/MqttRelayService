@@ -66,7 +66,7 @@ public class MessageDeliveryServiceTests
 
         _routerMock.Setup(r => r.RouteAsync(It.IsAny<RouteContext>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(targets);
-        _brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+        _brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
 
         // 使用反射调用私有方法
@@ -79,6 +79,7 @@ public class MessageDeliveryServiceTests
             It.IsAny<byte[]>(),
             It.IsAny<int>(),
             It.Is<string>(s => s == "client-1"),
+            It.Is<bool>(retain => !retain),
             It.IsAny<CancellationToken>()),
             Times.Once);
     }
@@ -96,7 +97,7 @@ public class MessageDeliveryServiceTests
 
         _routerMock.Setup(r => r.RouteAsync(It.IsAny<RouteContext>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(targets);
-        _brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+        _brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
 
         var method = typeof(MessageDeliveryService).GetMethod("ProcessMessageAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
@@ -108,6 +109,7 @@ public class MessageDeliveryServiceTests
             It.IsAny<byte[]>(),
             It.IsAny<int>(),
             It.IsAny<string>(),
+            It.IsAny<bool>(),
             It.IsAny<CancellationToken>()),
             Times.Once);
     }
@@ -123,7 +125,7 @@ public class MessageDeliveryServiceTests
 
         _routerMock.Setup(r => r.RouteAsync(It.IsAny<RouteContext>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(targets);
-        _brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+        _brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(false);
         _retryPolicyMock.Setup(rp => rp.GetDelayAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(TimeSpan.FromMilliseconds(50));
@@ -153,7 +155,7 @@ public class MessageDeliveryServiceTests
 
         _routerMock.Setup(r => r.RouteAsync(It.IsAny<RouteContext>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(targets);
-        _brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+        _brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(false);
         _deadLetterMock.Setup(d => d.WriteAsync(It.IsAny<DeadLetterRecord>(), It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
@@ -444,8 +446,8 @@ public class MessageDeliveryServiceTests
 
         routerMock.Setup(r => r.RouteAsync(It.IsAny<RouteContext>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new List<ForwardResult> { new() { TargetClientId = "client-2", Success = true } });
-        brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns<string, byte[], int, string?, CancellationToken>(async (_, _, _, _, token) =>
+        brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
+            .Returns<string, byte[], int, string?, bool, CancellationToken>(async (_, _, _, _, _, token) =>
             {
                 var currentCall = Interlocked.Increment(ref publishCallCount);
                 if (currentCall == 1)
@@ -534,7 +536,7 @@ public class MessageDeliveryServiceTests
 
         routerMock.Setup(r => r.RouteAsync(It.IsAny<RouteContext>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new List<ForwardResult> { new() { TargetClientId = "client-2", Success = true } });
-        brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+        brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(() => Interlocked.Increment(ref publishCallCount) >= 2);
         retryPolicyMock.Setup(rp => rp.GetDelayAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(TimeSpan.FromMilliseconds(50));
@@ -690,7 +692,7 @@ public class MessageDeliveryServiceTests
 
         _routerMock.Setup(r => r.RouteAsync(It.IsAny<RouteContext>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(targets);
-        _brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+        _brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(false);
 
         var method = typeof(MessageDeliveryService).GetMethod("ProcessMessageAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
@@ -707,7 +709,7 @@ public class MessageDeliveryServiceTests
     [Fact]
     public async Task TryForwardAsync_CancelledToken_RethrowsOperationCanceledException()
     {
-        _brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+        _brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
 
         var method = typeof(MessageDeliveryService).GetMethod("TryForwardAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
@@ -1064,8 +1066,8 @@ public class MessageDeliveryServiceTests
 
         routerMock.Setup(r => r.RouteAsync(It.IsAny<RouteContext>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new List<ForwardResult> { new() { TargetClientId = "client-2", Success = true } });
-        brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns<string, byte[], int, string?, CancellationToken>(async (_, _, _, _, _) =>
+        brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
+            .Returns<string, byte[], int, string?, bool, CancellationToken>(async (_, _, _, _, _, _) =>
             {
                 publishStarted.TrySetResult();
                 await allowPublishToFinish.Task;
@@ -1143,7 +1145,7 @@ public class MessageDeliveryServiceTests
         public Task StartAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
 
-        public Task<bool> PublishAsync(string topic, byte[] payload, int qos, string? sourceClientId = null, CancellationToken cancellationToken = default)
+        public Task<bool> PublishAsync(string topic, byte[] payload, int qos, string? sourceClientId = null, bool retain = false, CancellationToken cancellationToken = default)
         {
             PublishCalled = true;
             PublishCallCount++;

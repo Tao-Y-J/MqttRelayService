@@ -27,6 +27,7 @@ public interface IMqttBrokerHost
     /// <param name="payload">消息负载</param>
     /// <param name="qos">QoS 等级</param>
     /// <param name="sourceClientId">源客户端 ID（用于 EchoToSender=false 时阻止回发）</param>
+    /// <param name="retain">是否按 MQTT Retained Message 语义保留最后一条消息</param>
     /// <param name="cancellationToken">取消令牌</param>
-    Task<bool> PublishAsync(string topic, byte[] payload, int qos, string? sourceClientId = null, CancellationToken cancellationToken = default);
+    Task<bool> PublishAsync(string topic, byte[] payload, int qos, string? sourceClientId = null, bool retain = false, CancellationToken cancellationToken = default);
 }

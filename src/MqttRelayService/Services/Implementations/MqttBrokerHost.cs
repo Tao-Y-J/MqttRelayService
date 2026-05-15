@@ -126,7 +126,13 @@ public class MqttBrokerHost : IMqttBrokerHost, IDisposable
     /// <summary>
     /// 向指定 Topic 注入应用消息，由 Broker 自动分发给匹配的订阅者
     /// </summary>
-    public async Task<bool> PublishAsync(string topic, byte[] payload, int qos, string? sourceClientId = null, CancellationToken cancellationToken = default)
+    public async Task<bool> PublishAsync(
+        string topic,
+        byte[] payload,
+        int qos,
+        string? sourceClientId = null,
+        bool retain = false,
+        CancellationToken cancellationToken = default)
     {
         if (_mqttServer == null || !_mqttServer.IsStarted)
         {
@@ -139,7 +145,8 @@ public class MqttBrokerHost : IMqttBrokerHost, IDisposable
             var messageBuilder = new MqttApplicationMessageBuilder()
                 .WithTopic(topic)
                 .WithPayload(payload)
-                .WithQualityOfServiceLevel((MqttQualityOfServiceLevel)qos);
+                .WithQualityOfServiceLevel((MqttQualityOfServiceLevel)qos)
+                .WithRetainFlag(retain);
 
             string? relayMessageId = null;
 
@@ -239,6 +246,7 @@ public class MqttBrokerHost : IMqttBrokerHost, IDisposable
                     ? Array.Empty<byte>() 
                     : BuffersExtensions.ToArray(e.ApplicationMessage.Payload),
                 QoS = (int)e.ApplicationMessage.QualityOfServiceLevel,
+                Retain = e.ApplicationMessage.Retain,
                 SourceClientId = e.ClientId,
                 Timestamp = DateTime.UtcNow
             };

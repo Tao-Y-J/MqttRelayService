@@ -412,6 +412,84 @@ public class MqttBrokerIntegrationTests
     }
 
     /// <summary>
+    /// Retained 消息经过内部队列转发后，迟到订阅者仍应收到 Broker 保存的最后一条消息。
+    /// </summary>
+    [Fact]
+    public async Task RetainedPublish_LateSubscriberReceivesRetainedMessage()
+    {
+        var (broker, queue, registry, delivery, port) = CreateServices(echoToSender: false);
+
+        try
+        {
+            await broker.StartAsync();
+            await delivery.StartAsync();
+
+            var factory = new MqttClientFactory();
+            var publisher = factory.CreateMqttClient();
+            var subscriber = factory.CreateMqttClient();
+
+            try
+            {
+                var publisherOptions = new MqttClientOptionsBuilder()
+                    .WithTcpServer("127.0.0.1", port)
+                    .WithClientId("client-retain-pub")
+                    .WithProtocolVersion(MqttProtocolVersion.V500)
+                    .Build();
+                var subscriberOptions = new MqttClientOptionsBuilder()
+                    .WithTcpServer("127.0.0.1", port)
+                    .WithClientId("client-retain-sub")
+                    .WithProtocolVersion(MqttProtocolVersion.V500)
+                    .Build();
+
+                await publisher.ConnectAsync(publisherOptions);
+
+                var topic = "test/retain-late-subscriber";
+                var payload = Encoding.UTF8.GetBytes("retained-value");
+                var message = new MqttApplicationMessageBuilder()
+                    .WithTopic(topic)
+                    .WithPayload(payload)
+                    .WithRetainFlag(true)
+                    .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
+                    .Build();
+
+                await publisher.PublishAsync(message);
+                await Task.Delay(500);
+
+                var received = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+                subscriber.ApplicationMessageReceivedAsync += e =>
+                {
+                    received.TrySetResult(Encoding.UTF8.GetString(e.ApplicationMessage.Payload));
+                    return Task.CompletedTask;
+                };
+
+                await subscriber.ConnectAsync(subscriberOptions);
+                await subscriber.SubscribeAsync(new MqttClientSubscribeOptions
+                {
+                    TopicFilters = [new MqttTopicFilter { Topic = topic, QualityOfServiceLevel = MqttQualityOfServiceLevel.AtLeastOnce }]
+                });
+
+                var timeout = Task.Delay(TimeSpan.FromSeconds(5));
+                var completed = await Task.WhenAny(received.Task, timeout);
+                Assert.Equal(received.Task, completed);
+                Assert.Equal("retained-value", await received.Task);
+            }
+            finally
+            {
+                await publisher.DisconnectAsync();
+                await subscriber.DisconnectAsync();
+                publisher.Dispose();
+                subscriber.Dispose();
+            }
+        }
+        finally
+        {
+            await delivery.StopAsync();
+            await broker.StopAsync();
+            broker.Dispose();
+        }
+    }
+
+    /// <summary>
     /// 客户端伪造内部转发标记时，仍应进入内部队列，不能绕过发布拦截路径
     /// </summary>
     [Fact]

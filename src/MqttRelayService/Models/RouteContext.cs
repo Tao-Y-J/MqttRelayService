@@ -26,6 +26,11 @@ public class RouteContext
     public int QoS { get; set; }
 
     /// <summary>
+    /// 是否按 MQTT Retained Message 语义保留最后一条消息
+    /// </summary>
+    public bool Retain { get; set; }
+
+    /// <summary>
     /// 来源客户端标识
     /// </summary>
     public string SourceClientId { get; set; } = string.Empty;

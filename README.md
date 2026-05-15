@@ -172,6 +172,7 @@ Scripts\uninstall-service.cmd
 
 **当前限制**：
 - 使用**内存队列**（`InMemoryMessageQueue`），进程异常退出或机器宕机时，未完成转发的内存消息会丢失
+- Retained Message 使用 MQTTnet Broker 的运行期内存 retained 语义；服务进程重启后 retained 消息不会恢复
 - 死信记录写入本地 JSON 文件，不依赖外部存储
 - 未实现磁盘队列或消息持久化
 - 停机 drain 是否来得及覆盖一次失败消息的最大退避，取决于 `ShutdownDrainTimeoutMs` 是否不小于 `RetryMaxDelayMs`
@@ -181,6 +182,7 @@ Scripts\uninstall-service.cmd
 以下能力在当前版本中**未实现**，如后续有需求需单独评估：
 
 - 磁盘队列或消息持久化
+- Retained Message 的磁盘持久化
 - 集群部署或多节点桥接
 - 连接外部 MQTT Broker（桥接模式）
 - Web 管理后台

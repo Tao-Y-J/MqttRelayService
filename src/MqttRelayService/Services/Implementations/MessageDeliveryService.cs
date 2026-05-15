@@ -298,7 +298,7 @@ public class MessageDeliveryService : IMessageDeliveryService
             message.Status = MessageProcessStatus.Routing;
             var targets = await _router.RouteAsync(context, cancellationToken);
 
-            if (targets.Count == 0)
+            if (targets.Count == 0 && !context.Retain)
             {
                 _logger.LogWarning("消息 {MessageId} 没有找到匹配的目标客户端", context.MessageId);
                 message.Status = MessageProcessStatus.Succeeded; // 没有目标也算成功
@@ -350,6 +350,7 @@ public class MessageDeliveryService : IMessageDeliveryService
                 context.Payload,
                 context.QoS,
                 context.SourceClientId,
+                context.Retain,
                 linkedCts.Token);
 
             if (success)
