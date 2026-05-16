@@ -5,225 +5,226 @@ using MqttRelayService.Options;
 using MqttRelayService.Services.Implementations;
 using Xunit;
 
-namespace MqttRelayService.Tests;
-
-/// <summary>
-/// ClientRegistry 单元测试
-/// </summary>
-public class ClientRegistryTests
+namespace MqttRelayService.Tests
 {
-    private readonly ClientRegistry _registry;
-
-    public ClientRegistryTests()
+    /// <summary>
+    /// ClientRegistry 单元测试
+    /// </summary>
+    public class ClientRegistryTests
     {
-        var loggerMock = new Mock<ILogger<ClientRegistry>>();
-        _registry = new ClientRegistry(loggerMock.Object);
-    }
+        private readonly ClientRegistry _registry;
 
-    [Fact]
-    public async Task RegisterAsync_NewClient_IncreasesCount()
-    {
-        var session = new ClientSessionInfo
+        public ClientRegistryTests()
         {
-            ClientId = "client-1",
-            Username = "user1",
-            ConnectedAt = DateTime.UtcNow,
-            Status = ConnectionStatus.Connected
-        };
-
-        await _registry.RegisterAsync(session);
-
-        Assert.Equal(1, _registry.Count);
-    }
-
-    [Fact]
-    public async Task UnregisterAsync_ExistingClient_DecreasesCount()
-    {
-        var session = new ClientSessionInfo
-        {
-            ClientId = "client-1",
-            ConnectionId = "conn-1",
-            Username = "user1",
-            ConnectedAt = DateTime.UtcNow,
-            Status = ConnectionStatus.Connected
-        };
-
-        await _registry.RegisterAsync(session);
-        await _registry.UnregisterAsync("client-1", "conn-1");
-
-        Assert.Equal(0, _registry.Count);
-    }
-
-    [Fact]
-    public async Task UnregisterAsync_StaleConnection_DoesNotRemoveReconnectedClient()
-    {
-        var oldSession = new ClientSessionInfo
-        {
-            ClientId = "client-1",
-            ConnectionId = "conn-old",
-            Username = "user1",
-            ConnectedAt = DateTime.UtcNow,
-            Status = ConnectionStatus.Connected
-        };
-        var newSession = new ClientSessionInfo
-        {
-            ClientId = "client-1",
-            ConnectionId = "conn-new",
-            Username = "user1",
-            ConnectedAt = DateTime.UtcNow.AddSeconds(1),
-            Status = ConnectionStatus.Connected
-        };
-
-        await _registry.RegisterAsync(oldSession);
-        await _registry.RegisterAsync(newSession);
-        await _registry.UnregisterAsync("client-1", "conn-old");
-
-        var result = await _registry.GetSessionAsync("client-1");
-        Assert.Equal(1, _registry.Count);
-        Assert.NotNull(result);
-        Assert.Equal("conn-new", result!.ConnectionId);
-        Assert.Equal(ConnectionStatus.Connected, result.Status);
-    }
-
-    [Fact]
-    public async Task GetSessionAsync_ExistingClient_ReturnsSession()
-    {
-        var session = new ClientSessionInfo
-        {
-            ClientId = "client-1",
-            ConnectionId = "conn-1",
-            Username = "user1",
-            ConnectedAt = DateTime.UtcNow,
-            Status = ConnectionStatus.Connected
-        };
-
-        await _registry.RegisterAsync(session);
-        var result = await _registry.GetSessionAsync("client-1");
-
-        Assert.NotNull(result);
-        Assert.Equal("client-1", result!.ClientId);
-        Assert.Equal("conn-1", result.ConnectionId);
-    }
-
-    [Fact]
-    public async Task UpdateSubscriptionAsync_AddsTopic()
-    {
-        var session = new ClientSessionInfo
-        {
-            ClientId = "client-1",
-            Username = "user1",
-            ConnectedAt = DateTime.UtcNow,
-            Status = ConnectionStatus.Connected
-        };
-
-        await _registry.RegisterAsync(session);
-        await _registry.UpdateSubscriptionAsync("client-1", "test/topic", true);
-
-        var result = await _registry.GetSessionAsync("client-1");
-        Assert.Contains("test/topic", result!.Subscriptions);
-    }
-
-    [Fact]
-    public async Task UpdateSubscriptionAsync_RemovesTopic()
-    {
-        var session = new ClientSessionInfo
-        {
-            ClientId = "client-1",
-            Username = "user1",
-            ConnectedAt = DateTime.UtcNow,
-            Status = ConnectionStatus.Connected
-        };
-
-        await _registry.RegisterAsync(session);
-        await _registry.UpdateSubscriptionAsync("client-1", "test/topic", true);
-        await _registry.UpdateSubscriptionAsync("client-1", "test/topic", false);
-
-        var result = await _registry.GetSessionAsync("client-1");
-        Assert.DoesNotContain("test/topic", result!.Subscriptions);
-    }
-
-    [Fact]
-    public async Task ConcurrentAccess_MultipleClients_HandledCorrectly()
-    {
-        var tasks = new List<Task>();
-
-        for (int i = 0; i < 100; i++)
-        {
-            var clientId = $"client-{i}";
-            tasks.Add(Task.Run(async () =>
-            {
-                var session = new ClientSessionInfo
-                {
-                    ClientId = clientId,
-                    Username = "user",
-                    ConnectedAt = DateTime.UtcNow,
-                    Status = ConnectionStatus.Connected
-                };
-                await _registry.RegisterAsync(session);
-            }));
+            var loggerMock = new Mock<ILogger<ClientRegistry>>();
+            _registry = new ClientRegistry(loggerMock.Object);
         }
 
-        await Task.WhenAll(tasks);
-
-        Assert.Equal(100, _registry.Count);
-    }
-
-    [Fact]
-    public async Task RouteAsync_ConcurrentSubscriptionUpdates_DoesNotThrow()
-    {
-        var session = new ClientSessionInfo
+        [Fact]
+        public async Task RegisterAsync_NewClient_IncreasesCount()
         {
-            ClientId = "client-1",
-            Username = "user1",
-            ConnectedAt = DateTime.UtcNow,
-            Status = ConnectionStatus.Connected
-        };
-
-        await _registry.RegisterAsync(session);
-
-        var router = new MessageRouter(
-            _registry,
-            Microsoft.Extensions.Options.Options.Create(new RoutingOptions { EchoToSender = true }),
-            new Mock<ILogger<MessageRouter>>().Object);
-
-        var context = new RouteContext
-        {
-            MessageId = "msg-1",
-            Topic = "test/topic",
-            SourceClientId = "client-source"
-        };
-
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
-        var updateTask = Task.Run(async () =>
-        {
-            while (!cts.Token.IsCancellationRequested)
+            var session = new ClientSessionInfo
             {
-                await _registry.UpdateSubscriptionAsync("client-1", "test/topic", true, cts.Token);
-                await _registry.UpdateSubscriptionAsync("client-1", "test/topic", false, cts.Token);
-            }
-        });
+                ClientId = "client-1",
+                Username = "user1",
+                ConnectedAt = DateTime.UtcNow,
+                Status = ConnectionStatus.Connected
+            };
 
-        var routeTasks = Enumerable.Range(0, 8)
-            .Select(_ => Task.Run(async () =>
+            await _registry.RegisterAsync(session);
+
+            Assert.Equal(1, _registry.Count);
+        }
+
+        [Fact]
+        public async Task UnregisterAsync_ExistingClient_DecreasesCount()
+        {
+            var session = new ClientSessionInfo
+            {
+                ClientId = "client-1",
+                ConnectionId = "conn-1",
+                Username = "user1",
+                ConnectedAt = DateTime.UtcNow,
+                Status = ConnectionStatus.Connected
+            };
+
+            await _registry.RegisterAsync(session);
+            await _registry.UnregisterAsync("client-1", "conn-1");
+
+            Assert.Equal(0, _registry.Count);
+        }
+
+        [Fact]
+        public async Task UnregisterAsync_StaleConnection_DoesNotRemoveReconnectedClient()
+        {
+            var oldSession = new ClientSessionInfo
+            {
+                ClientId = "client-1",
+                ConnectionId = "conn-old",
+                Username = "user1",
+                ConnectedAt = DateTime.UtcNow,
+                Status = ConnectionStatus.Connected
+            };
+            var newSession = new ClientSessionInfo
+            {
+                ClientId = "client-1",
+                ConnectionId = "conn-new",
+                Username = "user1",
+                ConnectedAt = DateTime.UtcNow.AddSeconds(1),
+                Status = ConnectionStatus.Connected
+            };
+
+            await _registry.RegisterAsync(oldSession);
+            await _registry.RegisterAsync(newSession);
+            await _registry.UnregisterAsync("client-1", "conn-old");
+
+            var result = await _registry.GetSessionAsync("client-1");
+            Assert.Equal(1, _registry.Count);
+            Assert.NotNull(result);
+            Assert.Equal("conn-new", result!.ConnectionId);
+            Assert.Equal(ConnectionStatus.Connected, result.Status);
+        }
+
+        [Fact]
+        public async Task GetSessionAsync_ExistingClient_ReturnsSession()
+        {
+            var session = new ClientSessionInfo
+            {
+                ClientId = "client-1",
+                ConnectionId = "conn-1",
+                Username = "user1",
+                ConnectedAt = DateTime.UtcNow,
+                Status = ConnectionStatus.Connected
+            };
+
+            await _registry.RegisterAsync(session);
+            var result = await _registry.GetSessionAsync("client-1");
+
+            Assert.NotNull(result);
+            Assert.Equal("client-1", result!.ClientId);
+            Assert.Equal("conn-1", result.ConnectionId);
+        }
+
+        [Fact]
+        public async Task UpdateSubscriptionAsync_AddsTopic()
+        {
+            var session = new ClientSessionInfo
+            {
+                ClientId = "client-1",
+                Username = "user1",
+                ConnectedAt = DateTime.UtcNow,
+                Status = ConnectionStatus.Connected
+            };
+
+            await _registry.RegisterAsync(session);
+            await _registry.UpdateSubscriptionAsync("client-1", "test/topic", true);
+
+            var result = await _registry.GetSessionAsync("client-1");
+            Assert.Contains("test/topic", result!.Subscriptions);
+        }
+
+        [Fact]
+        public async Task UpdateSubscriptionAsync_RemovesTopic()
+        {
+            var session = new ClientSessionInfo
+            {
+                ClientId = "client-1",
+                Username = "user1",
+                ConnectedAt = DateTime.UtcNow,
+                Status = ConnectionStatus.Connected
+            };
+
+            await _registry.RegisterAsync(session);
+            await _registry.UpdateSubscriptionAsync("client-1", "test/topic", true);
+            await _registry.UpdateSubscriptionAsync("client-1", "test/topic", false);
+
+            var result = await _registry.GetSessionAsync("client-1");
+            Assert.DoesNotContain("test/topic", result!.Subscriptions);
+        }
+
+        [Fact]
+        public async Task ConcurrentAccess_MultipleClients_HandledCorrectly()
+        {
+            var tasks = new List<Task>();
+
+            for (int i = 0; i < 100; i++)
+            {
+                var clientId = $"client-{i}";
+                tasks.Add(Task.Run(async () =>
+                {
+                    var session = new ClientSessionInfo
+                    {
+                        ClientId = clientId,
+                        Username = "user",
+                        ConnectedAt = DateTime.UtcNow,
+                        Status = ConnectionStatus.Connected
+                    };
+                    await _registry.RegisterAsync(session);
+                }));
+            }
+
+            await Task.WhenAll(tasks);
+
+            Assert.Equal(100, _registry.Count);
+        }
+
+        [Fact]
+        public async Task RouteAsync_ConcurrentSubscriptionUpdates_DoesNotThrow()
+        {
+            var session = new ClientSessionInfo
+            {
+                ClientId = "client-1",
+                Username = "user1",
+                ConnectedAt = DateTime.UtcNow,
+                Status = ConnectionStatus.Connected
+            };
+
+            await _registry.RegisterAsync(session);
+
+            var router = new MessageRouter(
+                _registry,
+                Microsoft.Extensions.Options.Options.Create(new RoutingOptions { EchoToSender = true }),
+                new Mock<ILogger<MessageRouter>>().Object);
+
+            var context = new RouteContext
+            {
+                MessageId = "msg-1",
+                Topic = "test/topic",
+                SourceClientId = "client-source"
+            };
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+            var updateTask = Task.Run(async () =>
             {
                 while (!cts.Token.IsCancellationRequested)
                 {
-                    await router.RouteAsync(context, cts.Token);
+                    await _registry.UpdateSubscriptionAsync("client-1", "test/topic", true, cts.Token);
+                    await _registry.UpdateSubscriptionAsync("client-1", "test/topic", false, cts.Token);
                 }
-            }))
-            .ToArray();
+            });
 
-        await Task.Delay(TimeSpan.FromMilliseconds(500));
-        await cts.CancelAsync();
+            var routeTasks = Enumerable.Range(0, 8)
+                .Select(_ => Task.Run(async () =>
+                {
+                    while (!cts.Token.IsCancellationRequested)
+                    {
+                        await router.RouteAsync(context, cts.Token);
+                    }
+                }))
+                .ToArray();
 
-        var tasks = routeTasks.Append(updateTask).ToArray();
-        var ex = await Record.ExceptionAsync(() => Task.WhenAll(tasks));
+            await Task.Delay(TimeSpan.FromMilliseconds(500));
+            await cts.CancelAsync();
 
-        if (ex is OperationCanceledException)
-        {
-            ex = null;
+            var tasks = routeTasks.Append(updateTask).ToArray();
+            var ex = await Record.ExceptionAsync(() => Task.WhenAll(tasks));
+
+            if (ex is OperationCanceledException)
+            {
+                ex = null;
+            }
+
+            Assert.Null(ex);
         }
-
-        Assert.Null(ex);
     }
 }

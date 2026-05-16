@@ -3,33 +3,34 @@ using Microsoft.Extensions.Hosting;
 using MqttRelayService.Workers;
 using Xunit;
 
-namespace MqttRelayService.Tests;
-
-/// <summary>
-/// Host 停机顺序测试，验证 Program.cs 的真实后台服务注册顺序。
-/// </summary>
-public class HostShutdownOrderTests
+namespace MqttRelayService.Tests
 {
-    [Fact]
-    public void RegisterHostedServices_RegistersShutdownSafeOrder()
+    /// <summary>
+    /// Host 停机顺序测试，验证 Program.cs 的真实后台服务注册顺序。
+    /// </summary>
+    public class HostShutdownOrderTests
     {
-        var services = new ServiceCollection();
+        [Fact]
+        public void RegisterHostedServices_RegistersShutdownSafeOrder()
+        {
+            var services = new ServiceCollection();
 
-        Program.RegisterHostedServices(services);
+            Program.RegisterHostedServices(services);
 
-        var hostedServiceTypes = services
-            .Where(descriptor => descriptor.ServiceType == typeof(IHostedService))
-            .Select(descriptor => descriptor.ImplementationType)
-            .OfType<Type>()
-            .ToArray();
+            var hostedServiceTypes = services
+                .Where(descriptor => descriptor.ServiceType == typeof(IHostedService))
+                .Select(descriptor => descriptor.ImplementationType)
+                .OfType<Type>()
+                .ToArray();
 
-        Assert.Equal(
-            new[]
-            {
-                typeof(QueueMetricsWorker),
-                typeof(DeliveryWorker),
-                typeof(BrokerWorker)
-            },
-            hostedServiceTypes);
+            Assert.Equal(
+                new[]
+                {
+                    typeof(QueueMetricsWorker),
+                    typeof(DeliveryWorker),
+                    typeof(BrokerWorker)
+                },
+                hostedServiceTypes);
+        }
     }
 }

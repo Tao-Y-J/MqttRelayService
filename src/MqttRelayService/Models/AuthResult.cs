@@ -1,17 +1,18 @@
-﻿namespace MqttRelayService.Models;
-
-/// <summary>
-/// 认证结果
-/// </summary>
-public class AuthResult
+﻿namespace MqttRelayService.Models
 {
     /// <summary>
-    /// 是否认证成功
+    /// 认证结果
     /// </summary>
-    public bool Success { get; set; }
+    public class AuthResult
+    {
+        /// <summary>
+        /// 是否认证成功
+        /// </summary>
+        public bool Success { get; set; }
 
-    /// <summary>
-    /// 错误信息
-    /// </summary>
-    public string? ErrorMessage { get; set; }
+        /// <summary>
+        /// 错误信息
+        /// </summary>
+        public string? ErrorMessage { get; set; }
+    }
 }

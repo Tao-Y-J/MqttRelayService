@@ -87,6 +87,12 @@
 - 关键流程方法需要补中文注释，尤其是 Broker 启停、事件处理、入队出队、路由、重试、死信和优雅停机。
 - 注释要解释职责、边界和设计意图，不做逐行翻译。
 
+## C# 代码风格要求
+
+- 全仓库 C# 文件统一使用块级命名空间写法：`namespace MqttRelayService.Utilities { ... }`。
+- 不使用文件作用域命名空间写法：`namespace MqttRelayService.Utilities;`。
+- 新增或修改 `.cs` 文件时，保持上述命名空间风格，不把块级命名空间改回文件作用域命名空间。
+
 ## 文档协作
 
 - 每次新任务先读 `AGENTS.md`、`lessons.md` 和 `.codex/documents/01-长期有效规范/仓库上下文管理入口.md`。

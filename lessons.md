@@ -52,7 +52,13 @@ powershell -ExecutionPolicy Bypass -File "install-service.ps1"
 powershell -ExecutionPolicy Bypass -NoProfile -Command "& '%~dp0install-service.ps1'"
 ```
 
-## 2. MQTTnet 5.x 迁移经验
+## 2. C# 命名空间风格
+
+- 全仓库 `.cs` 文件统一使用块级命名空间写法：`namespace MqttRelayService.Utilities { ... }`。
+- 不使用文件作用域命名空间写法：`namespace MqttRelayService.Utilities;`。
+- 新增或修改 C# 文件时，必须保持块级命名空间风格，避免重新引入文件作用域 namespace。
+
+## 3. MQTTnet 5.x 迁移经验
 
 从 4.x 升级到 5.x 的重大变化：
 
@@ -62,7 +68,7 @@ powershell -ExecutionPolicy Bypass -NoProfile -Command "& '%~dp0install-service.
 - **消息注入**：使用 `InjectApplicationMessage(new InjectedMqttApplicationMessage(message))`
 - **连接验证**：`ValidatingConnectionAsync` 替代 `ConnectionValidator`
 
-## 3. .NET SDK 默认包含项
+## 4. .NET SDK 默认包含项
 
 .NET SDK 会自动包含项目目录中的某些文件类型，显式添加会导致 `NETSDK1022` 错误：
 
@@ -70,20 +76,20 @@ powershell -ExecutionPolicy Bypass -NoProfile -Command "& '%~dp0install-service.
 - 不需要在 `.csproj` 中显式 `<Content Include="appsettings.json">`
 - 如果需要自定义 `CopyToOutputDirectory`，使用 `<None Update="...">` 或关闭默认项：`EnableDefaultContentItems=false`
 
-## 4. 可靠性设计原则
+## 5. 可靠性设计原则
 
 - **事件回调必须轻量**：MQTT 事件处理中只做入队，不做复杂逻辑
 - **非阻塞出队**：`Channel.Reader.TryRead()` 替代 `WaitToReadAsync()`，避免测试和停机时卡住
 - **异常隔离**：每条消息独立 try/catch，单条失败不影响其他消息和消费循环
 - **状态机完整**：Received → Queued → Routing → Forwarding → Succeeded/Failed/DeadLetter
 
-## 5. 测试注意事项
+## 6. 测试注意事项
 
 - `Options.Create<T>()` 在 `using MqttRelayService.Options` 和 `using Microsoft.Extensions.Options` 同时存在时会产生歧义，必须使用完全限定名 `Microsoft.Extensions.Options.Options.Create(...)`
 - `InMemoryMessageQueue.TryDequeueAsync` 如果使用 `WaitToReadAsync`，空队列测试会无限等待，必须使用带 CancellationToken 的超时或改为非阻塞实现
 - `BoundedChannelFullMode.DropWrite` 模式下 `TryWrite` 始终返回 `true`（消息被静默丢弃），测试断言需要调整预期
 
-## 6. 主链路可靠性修复经验（2026-05-03）
+## 7. 主链路可靠性修复经验（2026-05-03）
 
 ### 6.1 BoundedChannelFullMode.DropWrite 陷阱
 
