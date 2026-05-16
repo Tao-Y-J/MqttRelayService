@@ -59,6 +59,7 @@ public class DeadLetterService : IDeadLetterService
         catch (Exception ex)
         {
             _logger.LogError(ex, "写入死信记录失败，消息 {MessageId}", record.MessageId);
+            throw;
         }
     }
 }

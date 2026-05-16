@@ -88,4 +88,40 @@ public class DeadLetterServiceTests : IDisposable
         var dateDir = Path.Combine(AppContext.BaseDirectory, _testDeadLetterPath);
         Assert.False(Directory.Exists(dateDir), "Directory should not be created when disabled");
     }
+
+    [Fact]
+    public async Task WriteAsync_WhenFileSystemWriteFails_Throws()
+    {
+        var filePath = Path.Combine(Path.GetTempPath(), $"deadletter-path-file-{Guid.NewGuid()}");
+        await File.WriteAllTextAsync(filePath, "not a directory");
+
+        try
+        {
+            var options = Microsoft.Extensions.Options.Options.Create(new ReliabilityOptions
+            {
+                EnableDeadLetter = true,
+                DeadLetterPath = filePath
+            });
+            var service = new DeadLetterService(options, new Mock<ILogger<DeadLetterService>>().Object);
+            var record = new DeadLetterRecord
+            {
+                MessageId = "msg-write-fails",
+                Topic = "test/topic",
+                SourceClientId = "client-1",
+                FirstReceivedAt = DateTime.UtcNow,
+                LastFailedAt = DateTime.UtcNow,
+                FailureReason = "Test failure",
+                RetryCount = 3
+            };
+
+            await Assert.ThrowsAsync<IOException>(() => service.WriteAsync(record));
+        }
+        finally
+        {
+            if (File.Exists(filePath))
+            {
+                File.Delete(filePath);
+            }
+        }
+    }
 }

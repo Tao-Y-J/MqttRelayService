@@ -48,19 +48,33 @@ public class ClientRegistry : IClientRegistry
     {
         try
         {
-            if (_sessions.TryGetValue(clientId, out var session)
-                && !string.IsNullOrEmpty(connectionId)
-                && !string.Equals(session.ConnectionId, connectionId, StringComparison.Ordinal))
+            while (true)
             {
-                _logger.LogWarning("忽略客户端 {ClientId} 的过期断开事件，事件连接 {EventConnectionId}，当前连接 {CurrentConnectionId}",
-                    clientId, connectionId, session.ConnectionId);
-                return Task.CompletedTask;
-            }
+                if (!_sessions.TryGetValue(clientId, out var session))
+                {
+                    return Task.CompletedTask;
+                }
 
-            if (_sessions.TryRemove(clientId, out _))
-            {
+                if (!string.IsNullOrEmpty(connectionId)
+                    && !string.Equals(session.ConnectionId, connectionId, StringComparison.Ordinal))
+                {
+                    _logger.LogWarning("忽略客户端 {ClientId} 的过期断开事件，事件连接 {EventConnectionId}，当前连接 {CurrentConnectionId}",
+                        clientId, connectionId, session.ConnectionId);
+                    return Task.CompletedTask;
+                }
+
+                var removed = ((ICollection<KeyValuePair<string, ClientSessionInfo>>)_sessions)
+                    .Remove(new KeyValuePair<string, ClientSessionInfo>(clientId, session));
+
+                if (!removed)
+                {
+                    // 读取和删除之间发生了同 ClientId 重连，重新检查最新会话，避免旧断开事件误删新连接。
+                    continue;
+                }
+
                 _logger.LogInformation("客户端 {ClientId} 已从在线客户端表移除，当前在线数 {Count}",
                     clientId, Count);
+                return Task.CompletedTask;
             }
         }
         catch (Exception ex)

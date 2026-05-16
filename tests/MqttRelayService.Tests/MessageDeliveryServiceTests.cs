@@ -169,6 +169,39 @@ public class MessageDeliveryServiceTests
     }
 
     [Fact]
+    public async Task ProcessMessageAsync_DeadLetterWriteFails_ReEnqueuesMessage()
+    {
+        var message = CreateTestMessage();
+        message.RetryCount = 3;
+        var targets = new List<ForwardResult>
+        {
+            new() { TargetClientId = "client-2", Success = true }
+        };
+
+        _routerMock.Setup(r => r.RouteAsync(It.IsAny<RouteContext>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(targets);
+        _brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        _deadLetterMock.Setup(d => d.WriteAsync(It.IsAny<DeadLetterRecord>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new IOException("dead letter path unavailable"));
+        _queueMock.Setup(q => q.EnqueueAsync(It.IsAny<ForwardMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+
+        var method = typeof(MessageDeliveryService).GetMethod("ProcessMessageAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        await (Task)method!.Invoke(_service, new object[] { message, CancellationToken.None })!;
+
+        _deadLetterMock.Verify(d => d.WriteAsync(
+            It.Is<DeadLetterRecord>(record => record.MessageId == "msg-1"),
+            It.IsAny<CancellationToken>()),
+            Times.Once);
+        _queueMock.Verify(q => q.EnqueueAsync(
+            It.Is<ForwardMessage>(m => m.MessageId == "msg-1"),
+            It.Is<CancellationToken>(token => !token.CanBeCanceled)),
+            Times.Once);
+        Assert.Equal(MessageProcessStatus.Failed, message.Status);
+    }
+
+    [Fact]
     public async Task ProcessMessageAsync_RouterException_TriggersRetry()
     {
         var message = CreateTestMessage();

@@ -704,6 +704,39 @@ public class MessageDeliveryService : IMessageDeliveryService
             RetryCount = message.RetryCount
         };
 
-        await _deadLetterService.WriteAsync(record, cancellationToken);
+        try
+        {
+            await _deadLetterService.WriteAsync(record, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "消息 {MessageId} 写入死信失败，尝试重新入队保留",
+                message.RouteContext.MessageId);
+
+            message.Status = MessageProcessStatus.Failed;
+
+            try
+            {
+                var preserved = await _queue.EnqueueAsync(message, CancellationToken.None);
+                if (preserved)
+                {
+                    _logger.LogWarning("消息 {MessageId} 因死信写入失败已重新入队保留",
+                        message.RouteContext.MessageId);
+                    return;
+                }
+            }
+            catch (Exception enqueueEx)
+            {
+                _logger.LogError(enqueueEx, "消息 {MessageId} 死信写入失败后重新入队也失败",
+                    message.RouteContext.MessageId);
+            }
+
+            message.Status = MessageProcessStatus.DeadLetter;
+            throw new InvalidOperationException($"消息 {message.RouteContext.MessageId} 写入死信失败且无法重新入队", ex);
+        }
     }
 }
