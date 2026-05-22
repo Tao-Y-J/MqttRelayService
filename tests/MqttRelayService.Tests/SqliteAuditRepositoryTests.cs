@@ -16,16 +16,25 @@ namespace MqttRelayService.Tests
     public class SqliteAuditRepositoryTests : IDisposable
     {
         private readonly SqliteAuditRepository _repository;
-        private readonly string _dbDir = "data";
-        private readonly string _dbFile = "data/audit.db";
+        private readonly string _testRoot;
+        private readonly string _dbDir;
+        private readonly string _dbFile;
+        private readonly string _dbWalFile;
+        private readonly string _dbShmFile;
 
         public SqliteAuditRepositoryTests()
         {
+            _testRoot = Path.Combine(Path.GetTempPath(), "MqttRelayServiceTests", Guid.NewGuid().ToString("N"));
+            _dbDir = Path.Combine(_testRoot, "data");
+            _dbFile = Path.Combine(_dbDir, "audit.db");
+            _dbWalFile = Path.Combine(_dbDir, "audit.db-wal");
+            _dbShmFile = Path.Combine(_dbDir, "audit.db-shm");
+
             // 清理已存在的测试数据库以保障环境纯净
             CleanDatabase();
 
             var loggerMock = new Mock<ILogger<SqliteAuditRepository>>();
-            _repository = new SqliteAuditRepository(loggerMock.Object);
+            _repository = new SqliteAuditRepository(loggerMock.Object, _dbFile);
         }
 
         private void CleanDatabase()
@@ -36,9 +45,21 @@ namespace MqttRelayService.Tests
                 {
                     File.Delete(_dbFile);
                 }
+                if (File.Exists(_dbWalFile))
+                {
+                    File.Delete(_dbWalFile);
+                }
+                if (File.Exists(_dbShmFile))
+                {
+                    File.Delete(_dbShmFile);
+                }
                 if (Directory.Exists(_dbDir))
                 {
                     Directory.Delete(_dbDir, true);
+                }
+                if (Directory.Exists(_testRoot))
+                {
+                    Directory.Delete(_testRoot, true);
                 }
             }
             catch
@@ -205,6 +226,60 @@ namespace MqttRelayService.Tests
             // client_09, client_08, client_07 保留
             Assert.Contains(clientItems, c => c.ClientId == "client_09");
             Assert.DoesNotContain(clientItems, c => c.ClientId == "client_00");
+        }
+
+        [Fact]
+        public async Task GetDashboardMessageSummaryAsync_ShouldReturnAuditAlignedCountsAndRecentItems()
+        {
+            await _repository.InitializeAsync();
+
+            var now = DateTime.UtcNow;
+            await _repository.RecordMessageAuditAsync(new MessageAuditRecord
+            {
+                MessageId = "sum_1",
+                Topic = "topic/1",
+                SourceClientId = "client_1",
+                PayloadSize = 1,
+                Qos = 0,
+                Retain = false,
+                Status = "Succeeded",
+                CreatedAt = now.AddSeconds(-3),
+                UpdatedAt = now.AddSeconds(-3)
+            });
+            await _repository.RecordMessageAuditAsync(new MessageAuditRecord
+            {
+                MessageId = "sum_2",
+                Topic = "topic/2",
+                SourceClientId = "client_2",
+                PayloadSize = 1,
+                Qos = 0,
+                Retain = false,
+                Status = "Failed",
+                CreatedAt = now.AddSeconds(-2),
+                UpdatedAt = now.AddSeconds(-2)
+            });
+            await _repository.RecordMessageAuditAsync(new MessageAuditRecord
+            {
+                MessageId = "sum_3",
+                Topic = "topic/3",
+                SourceClientId = "client_3",
+                PayloadSize = 1,
+                Qos = 0,
+                Retain = false,
+                Status = "DeadLetter",
+                CreatedAt = now.AddSeconds(-1),
+                UpdatedAt = now.AddSeconds(-1)
+            });
+
+            var summary = await _repository.GetDashboardMessageSummaryAsync(2);
+
+            Assert.Equal(3, summary.TotalMessages);
+            Assert.Equal(1, summary.TotalSucceeded);
+            Assert.Equal(1, summary.TotalFailed);
+            Assert.Equal(1, summary.TotalDeadLetter);
+            Assert.Equal(2, summary.RecentItems.Count);
+            Assert.Equal("sum_3", summary.RecentItems[0].MessageId);
+            Assert.Equal("sum_2", summary.RecentItems[1].MessageId);
         }
     }
 }

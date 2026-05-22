@@ -447,6 +447,36 @@ namespace MqttRelayService.Services.Implementations
                 history = _historySnapshots.ToList();
             }
 
+            var totalReceived = Interlocked.Read(ref _totalReceived);
+            var totalSucceeded = Interlocked.Read(ref _totalSucceeded);
+            var totalFailed = Interlocked.Read(ref _totalFailed);
+            var totalDeadLetter = Interlocked.Read(ref _totalDeadLetter);
+            IEnumerable<object> logs = _messageLogs.Values.OrderByDescending(x => x.SystemTimestamp).Cast<object>().ToList();
+
+            if (_auditRepository != null)
+            {
+                var auditSummary = await _auditRepository.GetDashboardMessageSummaryAsync(100);
+                totalReceived = auditSummary.TotalMessages;
+                totalSucceeded = auditSummary.TotalSucceeded;
+                totalFailed = auditSummary.TotalFailed;
+                totalDeadLetter = auditSummary.TotalDeadLetter;
+                logs = auditSummary.RecentItems.Select(record => new
+                {
+                    record.MessageId,
+                    record.Topic,
+                    record.SourceClientId,
+                    record.PayloadSize,
+                    record.Payload,
+                    Qos = record.Qos,
+                    Retain = record.Retain,
+                    record.Status,
+                    record.LatencyMs,
+                    record.RetryCount,
+                    Timestamp = record.CreatedAt.ToString("o"),
+                    record.ErrorMessage
+                }).Cast<object>().ToList();
+            }
+
             return new
             {
                 System = new
@@ -462,11 +492,11 @@ namespace MqttRelayService.Services.Implementations
                 },
                 Counters = new
                 {
-                    TotalReceived = Interlocked.Read(ref _totalReceived),
+                    TotalReceived = totalReceived,
                     TotalRejected = Interlocked.Read(ref _totalRejected),
-                    TotalSucceeded = Interlocked.Read(ref _totalSucceeded),
-                    TotalFailed = Interlocked.Read(ref _totalFailed),
-                    TotalDeadLetter = Interlocked.Read(ref _totalDeadLetter),
+                    TotalSucceeded = totalSucceeded,
+                    TotalFailed = totalFailed,
+                    TotalDeadLetter = totalDeadLetter,
                     TotalRetries = Interlocked.Read(ref _totalRetries)
                 },
                 Queue = new
@@ -482,7 +512,7 @@ namespace MqttRelayService.Services.Implementations
                     List = clients
                 },
                 History = history,
-                Logs = _messageLogs.Values.OrderByDescending(x => x.SystemTimestamp).Cast<object>().ToList(),
+                Logs = logs,
                 Configuration = new
                 {
                     QueueCapacity = _reliabilityOptions.QueueCapacity,

@@ -200,7 +200,6 @@ namespace MqttRelayService
                     {
                         return Results.Ok(new
                         {
-                            isPaused = controller.IsPaused,
                             maxMessagesPerSecond = controller.MaxMessagesPerSecond,
                             maxConcurrency = controller.MaxConcurrency,
                             activeCount = controller.ActiveCount
@@ -209,21 +208,11 @@ namespace MqttRelayService
 
                     app.MapPost("/api/settings/throughput", (ThroughputSettingsDto settings, ThroughputController controller) =>
                     {
-                        if (settings.IsPaused)
-                        {
-                            controller.Pause();
-                        }
-                        else
-                        {
-                            controller.Resume();
-                        }
-
                         controller.UpdateMaxMessagesPerSecond(settings.MaxMessagesPerSecond);
                         controller.UpdateMaxConcurrency(settings.MaxConcurrency);
 
                         return Results.Ok(new
                         {
-                            isPaused = controller.IsPaused,
                             maxMessagesPerSecond = controller.MaxMessagesPerSecond,
                             maxConcurrency = controller.MaxConcurrency,
                             activeCount = controller.ActiveCount
@@ -322,5 +311,5 @@ namespace MqttRelayService
     /// <summary>
     /// 吞吐量调控传输参数 DTO
     /// </summary>
-    public record ThroughputSettingsDto(bool IsPaused, int MaxMessagesPerSecond, int MaxConcurrency);
+    public record ThroughputSettingsDto(int MaxMessagesPerSecond, int MaxConcurrency);
 }

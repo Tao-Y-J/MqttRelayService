@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -169,39 +169,6 @@
             0% { transform: scale(0.9); opacity: 0.6; box-shadow: 0 0 4px rgba(239, 68, 68, 0.4); }
             50% { transform: scale(1.2); opacity: 1; box-shadow: 0 0 16px rgba(239, 68, 68, 0.8); }
             100% { transform: scale(0.9); opacity: 0.6; box-shadow: 0 0 4px rgba(239, 68, 68, 0.4); }
-        }
-
-        /* 演示模式切换按钮 */
-        .demo-toggle-container {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            background: rgba(255, 255, 255, 0.04);
-            border: 1px solid var(--border-muted);
-            padding: 0.35rem 0.8rem;
-            border-radius: 9999px;
-            font-size: 0.85rem;
-            font-weight: 600;
-            cursor: pointer;
-            user-select: none;
-            transition: all 0.3s ease;
-        }
-        .demo-toggle-container:hover {
-            background: rgba(255, 255, 255, 0.1);
-            border-color: var(--color-cyan);
-            box-shadow: 0 0 10px rgba(6, 182, 212, 0.2);
-        }
-        .demo-toggle-container.active {
-            border-color: #10b981;
-            background: rgba(16, 185, 129, 0.1);
-            box-shadow: 0 0 12px rgba(16, 185, 129, 0.2);
-        }
-        .demo-toggle-container.active span {
-            color: #10b981;
-        }
-        .demo-toggle-container.active i {
-            color: #10b981;
-            animation: fa-spin 2s linear infinite;
         }
 
         /* 标签导航栏 */
@@ -493,10 +460,24 @@
             border-radius: 8px;
         }
 
+        .paged-table-shell {
+            position: relative;
+            min-height: 360px;
+        }
+
+        /* 分页表格在加载/快速翻页时保持稳定高度，避免分页栏上浮到表格中间 */
+        .paged-table-responsive {
+            min-height: 360px;
+        }
+
         table {
             width: 100%;
             border-collapse: collapse;
             text-align: left;
+        }
+
+        .fixed-table {
+            table-layout: fixed;
         }
 
         th {
@@ -516,6 +497,9 @@
             font-size: 0.9rem;
             color: var(--text-primary);
             transition: var(--transition-smooth);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
 
         tr {
@@ -726,17 +710,22 @@
 
         /* 空状态显示 */
         .empty-state {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            padding: 3rem;
+            display: table-cell;
+            text-align: center;
+            vertical-align: middle;
+            padding: 3rem !important;
             color: var(--text-muted);
-            gap: 1rem;
+            min-height: 280px;
         }
 
         .empty-state i {
             font-size: 2.5rem;
+            display: block;
+            margin-bottom: 1rem;
+        }
+
+        .empty-state span {
+            display: block;
         }
 
         /* 滑块美化 */
@@ -799,11 +788,6 @@
         </div>
 
         <div class="system-status">
-            <!-- 演示模式切换按钮 -->
-            <div class="demo-toggle-container" onclick="toggleDemoMode()" title="开启后将自动模拟高频 MQTT 实时流量，方便展示大屏动态效果">
-                <i class="fa-solid fa-gauge-high" style="color: var(--color-cyan)"></i>
-                <span>演示模式: 关闭</span>
-            </div>
             <!-- 自动更新倒计时/最后更新指示器 -->
             <div class="status-pill" title="最后更新时间">
                 <i class="fa-solid fa-clock-rotate-left" style="color: var(--text-muted)"></i>
@@ -883,13 +867,6 @@
                             <span id="sync-status" class="badge badge-succeeded" style="font-size: 0.65rem; padding: 0.15rem 0.35rem; display: none;">已同步</span>
                         </div>
                         <div style="display: flex; flex-direction: column; gap: 1.2rem;">
-                            <!-- 一键启停开关 -->
-                            <div style="display: flex; justify-content: space-between; align-items: center;">
-                                <span style="font-size: 0.9rem; font-weight: 500; color: var(--text-secondary);">转发引擎状态</span>
-                                <button id="btn-toggle-relay" class="filter-btn active" style="padding: 0.5rem 1rem; font-weight: 600; font-size: 0.85rem; border-radius: 8px; cursor: pointer; transition: var(--transition-smooth); width: 130px; text-align: center;" onclick="toggleForwarding()">
-                                    <i class="fa-solid fa-play"></i> 运行中
-                                </button>
-                            </div>
                             <!-- MPS 滑动条 -->
                             <div>
                                 <div style="display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 0.3rem;">
@@ -917,8 +894,17 @@
                     <span class="panel-title"><i class="fa-solid fa-list-ul"></i> 最新转发消息队列</span>
                     <button class="filter-btn" onclick="switchTab('messages')">查看全部</button>
                 </div>
-                <div class="table-responsive">
-                    <table>
+                <div class="table-responsive paged-table-responsive">
+                    <table class="fixed-table">
+                        <colgroup>
+                            <col style="width: 12%">
+                            <col style="width: 16%">
+                            <col style="width: 13%">
+                            <col style="width: 21%">
+                            <col style="width: 18%">
+                            <col style="width: 10%">
+                            <col style="width: 10%">
+                        </colgroup>
                         <thead>
                             <tr>
                                 <th>时间</th>
@@ -955,8 +941,16 @@
                         <input type="text" id="client-search" class="search-input" placeholder="输入客户端 ID 或用户名搜索..." oninput="onClientSearchChange()">
                     </div>
                 </div>
-                <div class="table-responsive">
-                    <table>
+                <div class="table-responsive paged-table-responsive">
+                    <table class="fixed-table">
+                        <colgroup>
+                            <col style="width: 18%">
+                            <col style="width: 14%">
+                            <col style="width: 12%">
+                            <col style="width: 16%">
+                            <col style="width: 16%">
+                            <col style="width: 24%">
+                        </colgroup>
                         <thead>
                             <tr>
                                 <th>客户端 ID</th>
@@ -1010,22 +1004,32 @@
                         <button class="filter-btn" id="history-filter-unsubscribed" onclick="filterHistoryByEvent('Unsubscribed')">取消订阅</button>
                     </div>
                 </div>
-                <div class="table-responsive">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>发生时间</th>
-                                <th>客户端 ID</th>
-                                <th>用户名</th>
-                                <th>连接会话 ID</th>
-                                <th>事件</th>
-                                <th>审计详情</th>
-                            </tr>
-                        </thead>
-                        <tbody id="history-table-body">
-                            <!-- 动态加载 -->
-                        </tbody>
-                    </table>
+                <div class="paged-table-shell">
+                    <div class="table-responsive paged-table-responsive">
+                        <table class="fixed-table">
+                            <colgroup>
+                                <col style="width: 16%">
+                                <col style="width: 14%">
+                                <col style="width: 12%">
+                                <col style="width: 18%">
+                                <col style="width: 12%">
+                                <col style="width: 28%">
+                            </colgroup>
+                            <thead>
+                                <tr>
+                                    <th>发生时间</th>
+                                    <th>客户端 ID</th>
+                                    <th>用户名</th>
+                                    <th>连接会话 ID</th>
+                                    <th>事件</th>
+                                    <th>审计详情</th>
+                                </tr>
+                            </thead>
+                            <tbody id="history-table-body">
+                                <!-- 动态加载 -->
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
                 <!-- SQLite 服务端物理分页控件 -->
                 <div class="pagination-container" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--border-muted);">
@@ -1067,24 +1071,36 @@
                         <button class="filter-btn" id="msg-filter-deadletter" onclick="filterMessageByStatus('DeadLetter')">死信 (DLQ)</button>
                     </div>
                 </div>
-                <div class="table-responsive">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>时间</th>
-                                <th>消息 ID</th>
-                                <th>源客户端</th>
-                                <th>目标主题</th>
-                                <th>延迟</th>
-                                <th>重试次数</th>
-                                <th>状态</th>
-                                <th style="text-align: center;">操作</th>
-                            </tr>
-                        </thead>
-                        <tbody id="messages-table-body">
-                            <!-- 动态加载 -->
-                        </tbody>
-                    </table>
+                <div class="paged-table-shell">
+                    <div class="table-responsive paged-table-responsive">
+                        <table class="fixed-table">
+                            <colgroup>
+                                <col style="width: 14%">
+                                <col style="width: 18%">
+                                <col style="width: 14%">
+                                <col style="width: 18%">
+                                <col style="width: 9%">
+                                <col style="width: 9%">
+                                <col style="width: 10%">
+                                <col style="width: 8%">
+                            </colgroup>
+                            <thead>
+                                <tr>
+                                    <th>时间</th>
+                                    <th>消息 ID</th>
+                                    <th>源客户端</th>
+                                    <th>目标主题</th>
+                                    <th>延迟</th>
+                                    <th>重试次数</th>
+                                    <th>状态</th>
+                                    <th style="text-align: center;">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="messages-table-body">
+                                <!-- 动态加载 -->
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
                 <!-- SQLite 服务端物理分页控件 -->
                 <div class="pagination-container" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--border-muted);">
@@ -1117,23 +1133,34 @@
                         <input type="text" id="dlq-search" class="search-input" placeholder="输入死信消息 ID、主题搜索..." oninput="onDlqSearchChange()">
                     </div>
                 </div>
-                <div class="table-responsive">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>归档时间</th>
-                                <th>消息 ID</th>
-                                <th>源客户端</th>
-                                <th>原始目标主题</th>
-                                <th>重试次数</th>
-                                <th>死亡原因</th>
-                                <th style="text-align: center;">操作</th>
-                            </tr>
-                        </thead>
-                        <tbody id="dlq-table-body">
-                            <!-- 动态加载 -->
-                        </tbody>
-                    </table>
+                <div class="paged-table-shell">
+                    <div class="table-responsive paged-table-responsive">
+                        <table class="fixed-table">
+                            <colgroup>
+                                <col style="width: 14%">
+                                <col style="width: 18%">
+                                <col style="width: 14%">
+                                <col style="width: 18%">
+                                <col style="width: 9%">
+                                <col style="width: 19%">
+                                <col style="width: 8%">
+                            </colgroup>
+                            <thead>
+                                <tr>
+                                    <th>归档时间</th>
+                                    <th>消息 ID</th>
+                                    <th>源客户端</th>
+                                    <th>原始目标主题</th>
+                                    <th>重试次数</th>
+                                    <th>死亡原因</th>
+                                    <th style="text-align: center;">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="dlq-table-body">
+                                <!-- 动态加载 -->
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
                 <!-- SQLite 服务端物理分页控件 -->
                 <div class="pagination-container" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--border-muted);">
@@ -1314,7 +1341,6 @@
         let currentTab = 'dashboard';
         let rawMetrics = null;
         let throughputSettings = {
-            isPaused: false,
             maxMessagesPerSecond: 0,
             maxConcurrency: 50,
             activeCount: 0
@@ -1470,218 +1496,6 @@
             }
         }
 
-        // ==================== 演示模式模拟数据生成 ====================
-        let demoMode = false;
-        let demoHistory = [];
-        let demoClients = [];
-        let demoLogs = [];
-        let demoConnectionLogs = [];
-        let demoCounters = {
-            totalReceived: 0,
-            totalRejected: 0,
-            totalSucceeded: 0,
-            totalFailed: 0,
-            totalDeadLetter: 0,
-            totalRetries: 0
-        };
-
-        function toggleDemoMode() {
-            demoMode = !demoMode;
-            const btn = document.querySelector('.demo-toggle-container');
-            const span = btn.querySelector('span');
-            if (demoMode) {
-                btn.classList.add('active');
-                span.textContent = '演示模式: 开启';
-                
-                demoCounters = {
-                    totalReceived: 18542,
-                    totalRejected: 0,
-                    totalSucceeded: 18526,
-                    totalFailed: 16,
-                    totalDeadLetter: 7,
-                    totalRetries: 45
-                };
-                
-                demoHistory = [];
-                const now = new Date();
-                for (let i = 20; i >= 0; i--) {
-                    const tempTime = new Date(now.getTime() - i * 2000);
-                    const rx = Math.floor(10 + Math.random() * 30);
-                    const sx = rx - (Math.random() > 0.95 ? 1 : 0);
-                    const fx = rx - sx;
-                    demoHistory.push({
-                        time: tempTime.toTimeString().split(' ')[0],
-                        received: rx,
-                        succeeded: sx,
-                        failed: fx,
-                        deadLetter: fx > 0 && Math.random() > 0.5 ? 1 : 0,
-                        queueSize: Math.floor(Math.random() * 3)
-                    });
-                }
-                
-                demoClients = [
-                    { clientId: 'thermometer-room1', username: 'room1', connectionId: 'CONN-01', connectedAt: '2026-05-23 00:00:05', lastActivityAt: new Date().toLocaleTimeString(), status: 'Connected', subscriptions: ['telemetry/temp', 'telemetry/humidity'] },
-                    { clientId: 'agv-car-02', username: 'agv02', connectionId: 'CONN-02', connectedAt: '2026-05-23 00:05:12', lastActivityAt: new Date().toLocaleTimeString(), status: 'Connected', subscriptions: ['agv/control', 'agv/status'] },
-                    { clientId: 'smart-gateway', username: 'gateway', connectionId: 'CONN-03', connectedAt: '2026-05-23 00:10:45', lastActivityAt: new Date().toLocaleTimeString(), status: 'Connected', subscriptions: ['+/telemetry/#'] },
-                    { clientId: 'inverter-device', username: 'inverter', connectionId: 'CONN-04', connectedAt: '2026-05-23 00:12:30', lastActivityAt: new Date().toLocaleTimeString(), status: 'Connected', subscriptions: ['power/inverter'] },
-                    { clientId: 'humidity-sensor', username: 'sensor', connectionId: 'CONN-05', connectedAt: '2026-05-23 00:14:15', lastActivityAt: new Date().toLocaleTimeString(), status: 'Connected', subscriptions: ['telemetry/humidity'] },
-                    { clientId: 'boiler-pressure', username: 'boiler', connectionId: 'CONN-06', connectedAt: '2026-05-23 00:20:10', lastActivityAt: new Date().toLocaleTimeString(), status: 'Connected', subscriptions: ['boiler/alerts', 'telemetry/pressure'] },
-                    { clientId: 'ventilation-fan', username: 'ventilation', connectionId: 'CONN-07', connectedAt: '2026-05-23 00:25:34', lastActivityAt: new Date().toLocaleTimeString(), status: 'Connected', subscriptions: ['ventilation/control'] },
-                    { clientId: 'power-meter-01', username: 'power', connectionId: 'CONN-08', connectedAt: '2026-05-23 00:30:12', lastActivityAt: new Date().toLocaleTimeString(), status: 'Connected', subscriptions: ['power/telemetry'] },
-                    { clientId: 'gas-leak-detector', username: 'gas', connectionId: 'CONN-09', connectedAt: '2026-05-23 00:35:45', lastActivityAt: new Date().toLocaleTimeString(), status: 'Connected', subscriptions: ['alerts/gas'] },
-                    { clientId: 'conveyor-belt-A', username: 'conveyor', connectionId: 'CONN-10', connectedAt: '2026-05-23 00:40:11', lastActivityAt: new Date().toLocaleTimeString(), status: 'Connected', subscriptions: ['conveyor/control', 'conveyor/status'] }
-                ];
-                
-                demoLogs = [];
-                for (let i = 0; i < 45; i++) {
-                    generateSingleDemoLog();
-                }
-
-                demoConnectionLogs = [];
-                for (let i = 0; i < 30; i++) {
-                    generateSingleDemoConnectionLog();
-                }
-            } else {
-                btn.classList.remove('active');
-                span.textContent = '演示模式: 关闭';
-            }
-            fetchMetrics();
-            fetchThroughputSettings();
-            if (currentTab === 'history') fetchConnectionHistory();
-            if (currentTab === 'messages') fetchMessagesAudit();
-            if (currentTab === 'dlq') fetchDlqAudit();
-        }
-
-        function generateSingleDemoLog() {
-            const topics = ['telemetry/temp', 'telemetry/humidity', 'agv/status', 'agv/control', 'power/inverter', 'sys/status', 'alerts/power', 'telemetry/pressure', 'alerts/gas'];
-            const clients = ['thermometer-room1', 'agv-car-02', 'smart-gateway', 'inverter-device', 'humidity-sensor', 'boiler-pressure', 'ventilation-fan', 'power-meter-01'];
-            const randTopic = topics[Math.floor(Math.random() * topics.length)];
-            const randClient = clients[Math.floor(Math.random() * clients.length)];
-            const randId = Math.random().toString(36).substring(2, 10).toUpperCase() + '-' + Math.random().toString(36).substring(2, 6).toUpperCase();
-            
-            const isSucc = Math.random() > 0.05;
-            const isDlq = !isSucc && Math.random() > 0.5;
-            
-            demoLogs.unshift({
-                messageId: randId,
-                topic: randTopic,
-                sourceClientId: randClient,
-                payloadSize: Math.floor(64 + Math.random() * 450),
-                qos: Math.random() > 0.5 ? 1 : 0,
-                retain: Math.random() > 0.9,
-                status: isSucc ? 'Succeeded' : (isDlq ? 'DeadLetter' : 'Failed'),
-                latencyMs: Math.round(2 + Math.random() * 58, 2),
-                retryCount: isSucc ? 0 : Math.floor(Math.random() * 3),
-                timestamp: new Date().toISOString(),
-                errorMessage: isSucc ? '' : (isDlq ? '达到重试上限 (3次)，移动至死信文件存储' : '转发注入失败，等待重试')
-            });
-            
-            if (demoLogs.length > 500) {
-                demoLogs.pop();
-            }
-        }
-
-        function generateSingleDemoConnectionLog() {
-            const clients = ['thermometer-room1', 'agv-car-02', 'smart-gateway', 'inverter-device', 'humidity-sensor', 'boiler-pressure', 'ventilation-fan', 'power-meter-01', 'gas-leak-detector'];
-            const events = ['Connected', 'Disconnected', 'Subscribed', 'Unsubscribed'];
-            const event = events[Math.floor(Math.random() * events.length)];
-            const clientId = clients[Math.floor(Math.random() * clients.length)];
-            
-            let details = '';
-            if (event === 'Connected') details = '客户端成功建立连接，会话状态为: Created';
-            else if (event === 'Disconnected') details = '连接已断开并注销会话';
-            else if (event === 'Subscribed') details = `主题: telemetry/${Math.random() > 0.5 ? 'sensor' : 'device'}`;
-            else details = `主题: telemetry/${Math.random() > 0.5 ? 'sensor' : 'device'}`;
-
-            demoConnectionLogs.unshift({
-                id: Math.floor(Math.random() * 10000),
-                clientId: clientId,
-                username: clientId.split('-')[0],
-                connectionId: 'CONN-' + Math.floor(Math.random() * 100).toString().padStart(2, '0'),
-                event: event,
-                details: details,
-                timestamp: new Date().toISOString()
-            });
-
-            if (demoConnectionLogs.length > 500) {
-                demoConnectionLogs.pop();
-            }
-        }
-
-        function generateDemoMetrics() {
-            const rx = throughputSettings.isPaused ? 0 : Math.floor(10 + Math.random() * 25);
-            const limitMps = throughputSettings.maxMessagesPerSecond;
-            let sx = rx;
-            if (limitMps > 0 && sx > limitMps) {
-                sx = limitMps; // 速率限制
-            }
-            const fx = rx - sx;
-            const dlq = fx > 0 && Math.random() > 0.5 ? 1 : 0;
-            
-            demoCounters.totalReceived += rx;
-            demoCounters.totalSucceeded += sx;
-            demoCounters.totalFailed += fx;
-            demoCounters.totalDeadLetter += dlq;
-            
-            const now = new Date();
-            demoHistory.push({
-                time: now.toTimeString().split(' ')[0],
-                received: rx,
-                succeeded: sx,
-                failed: fx,
-                deadLetter: dlq,
-                queueSize: Math.floor(Math.random() * 3)
-            });
-            if (demoHistory.length > 60) {
-                demoHistory.shift();
-            }
-            
-            if (!throughputSettings.isPaused) {
-                const numLogs = Math.floor(Math.random() * 3);
-                for (let i = 0; i < numLogs; i++) {
-                    generateSingleDemoLog();
-                }
-            }
-            
-            if (Math.random() > 0.8) {
-                generateSingleDemoConnectionLog();
-            }
-            
-            rawMetrics = {
-                system: {
-                    serviceName: "MqttRelayService (Demo Mode)",
-                    mqttPort: 1883,
-                    uptime: "0天 00:35:10 (演示模式)",
-                    osVersion: "Windows 11 Enterprise (Simulated)",
-                    dotNetVersion: ".NET 8.0.5 (Simulated)",
-                    cpuThreads: 16,
-                    memoryUsageMb: Math.round(72 + Math.random() * 12, 2),
-                    timestamp: now.toISOString()
-                },
-                counters: demoCounters,
-                queue: {
-                    current: throughputSettings.isPaused ? Math.min(1000, Math.floor(demoCounters.totalReceived * 0.05)) : Math.floor(Math.random() * 3),
-                    capacity: 1000,
-                    peak: 42,
-                    congestionPercentage: throughputSettings.isPaused ? Math.min(100, Math.round((demoCounters.totalReceived * 0.05 / 1000) * 100, 2)) : Math.round(Math.random() * 0.4, 2)
-                },
-                clients: {
-                    count: demoClients.length,
-                    list: demoClients
-                },
-                history: demoHistory,
-                logs: demoLogs,
-                configuration: {
-                    queueCapacity: 1000,
-                    maxConcurrentHandlers: throughputSettings.maxConcurrency,
-                    maxRetryCount: 3,
-                    maxPendingRetryTasks: 1000,
-                    enableDeadLetter: true,
-                    deadLetterPath: "data/deadletter"
-                }
-            };
-        }
-
         // ==================== 数据拉取与UI分段处理 ====================
 
         // 自动高频拉取主面板指标
@@ -1689,12 +1503,6 @@
             try {
                 const now = new Date();
                 document.getElementById('last-update-time').textContent = now.toTimeString().split(' ')[0];
-
-                if (demoMode) {
-                    generateDemoMetrics();
-                    updateDashboardUI();
-                    return;
-                }
 
                 // 1. 获取核心统计大屏
                 const response = await fetch('/api/metrics');
@@ -1716,7 +1524,6 @@
         // 静默同步吞吐调控参数，保持滑块状态与后端一致
         async function fetchThroughputSettings() {
             try {
-                if (demoMode) return;
                 const response = await fetch('/api/settings/throughput');
                 if (response.ok) {
                     throughputSettings = await response.json();
@@ -1728,18 +1535,15 @@
         }
 
         async function fetchThroughputSettingsSilently() {
-            if (demoMode) return;
             const response = await fetch('/api/settings/throughput');
             if (response.ok) {
                 throughputSettings = await response.json();
-                syncForwardingBtnUI();
+                syncSlidersUI();
             }
         }
 
-        // 将吞吐控制参数反向同步到滑动条及按钮
+        // 将吞吐控制参数反向同步到滑动条
         function syncSlidersUI() {
-            syncForwardingBtnUI();
-
             const mpsSlider = document.getElementById('slider-mps');
             mpsSlider.value = throughputSettings.maxMessagesPerSecond;
             onMpsSliderChange(throughputSettings.maxMessagesPerSecond);
@@ -1747,23 +1551,6 @@
             const concSlider = document.getElementById('slider-concurrency');
             concSlider.value = throughputSettings.maxConcurrency;
             onConcurrencySliderChange(throughputSettings.maxConcurrency);
-        }
-
-        function syncForwardingBtnUI() {
-            const btn = document.getElementById('btn-toggle-relay');
-            if (throughputSettings.isPaused) {
-                btn.className = 'filter-btn';
-                btn.style.borderColor = 'var(--color-danger)';
-                btn.style.color = 'var(--color-danger)';
-                btn.style.background = 'rgba(239, 68, 68, 0.08)';
-                btn.innerHTML = '<i class="fa-solid fa-pause"></i> 已暂停';
-            } else {
-                btn.className = 'filter-btn active';
-                btn.style.borderColor = 'var(--color-cyan)';
-                btn.style.color = 'var(--color-cyan)';
-                btn.style.background = 'rgba(6, 182, 212, 0.08)';
-                btn.innerHTML = '<i class="fa-solid fa-play"></i> 运行中';
-            }
         }
 
         // ==================== 吞吐与并发控制交互 ====================
@@ -1784,40 +1571,20 @@
             display.style.color = 'var(--color-purple)';
         }
 
-        // 启停控制
-        async function toggleForwarding() {
-            throughputSettings.isPaused = !throughputSettings.isPaused;
-            syncForwardingBtnUI();
-            await applyThroughputSettings();
-        }
-
         // 物理提交流控配置更新到后端 API
         async function applyThroughputSettings() {
             const mps = parseInt(document.getElementById('slider-mps').value);
             const concurrency = parseInt(document.getElementById('slider-concurrency').value);
             
             const payload = {
-                isPaused: throughputSettings.isPaused,
                 maxMessagesPerSecond: mps,
                 maxConcurrency: concurrency
             };
 
-            // 展示 "已同步" 微动反馈
             const syncBadge = document.getElementById('sync-status');
             syncBadge.style.display = 'inline-flex';
             syncBadge.textContent = '正在同步';
             syncBadge.className = 'badge badge-queued';
-
-            if (demoMode) {
-                throughputSettings.maxMessagesPerSecond = mps;
-                throughputSettings.maxConcurrency = concurrency;
-                setTimeout(() => {
-                    syncBadge.textContent = '已同步';
-                    syncBadge.className = 'badge badge-succeeded';
-                    setTimeout(() => { syncBadge.style.display = 'none'; }, 1000);
-                }, 300);
-                return;
-            }
 
             try {
                 const response = await fetch('/api/settings/throughput', {
@@ -1827,6 +1594,7 @@
                 });
                 if (response.ok) {
                     throughputSettings = await response.json();
+                    syncSlidersUI();
                     syncBadge.textContent = '已同步';
                     syncBadge.className = 'badge badge-succeeded';
                     setTimeout(() => { syncBadge.style.display = 'none'; }, 1000);
@@ -1847,15 +1615,13 @@
 
             const dot = document.getElementById('system-status-dot');
             if (dot) dot.className = 'status-dot online';
-            document.getElementById('system-status-text').textContent = demoMode ? 'Broker 运行中 (演示)' : 'Broker 运行中';
+            document.getElementById('system-status-text').textContent = 'Broker 运行中';
 
-            // KPI 卡片刷新
             document.getElementById('kpi-clients-count').textContent = rawMetrics.clients.count;
             document.getElementById('kpi-received-count').textContent = rawMetrics.counters.totalReceived.toLocaleString();
             document.getElementById('kpi-succeeded-count').textContent = rawMetrics.counters.totalSucceeded.toLocaleString();
             document.getElementById('kpi-deadletter-count').textContent = rawMetrics.counters.totalDeadLetter.toLocaleString();
 
-            // 吞吐速率波形更新
             if (rawMetrics.history && rawMetrics.history.length > 0) {
                 const history = rawMetrics.history;
                 const categories = history.map(h => h.time);
@@ -1873,10 +1639,8 @@
                 });
             }
 
-            // 缓存队列饱合度仪表更新
             queueGaugeChart.updateSeries([rawMetrics.queue.congestionPercentage]);
 
-            // 最新消息审计表刷新 (主页只提取前 8 条)
             const recentLogs = rawMetrics.logs.slice(0, 8);
             const recentTbody = document.getElementById('dashboard-recent-messages');
             if (recentLogs.length === 0) {
@@ -1899,12 +1663,10 @@
                 `).join('');
             }
 
-            // 激活特定 Tab 被动数据刷新
             if (currentTab === 'clients') {
                 renderOnlineClientsTable();
             }
 
-            // 系统配置面板更新
             document.getElementById('sys-service-name').textContent = rawMetrics.system.serviceName;
             document.getElementById('sys-mqtt-port').textContent = rawMetrics.system.mqttPort;
             document.getElementById('sys-uptime').textContent = rawMetrics.system.uptime;
@@ -1925,26 +1687,23 @@
         function renderOnlineClientsTable() {
             if (!rawMetrics) return;
             const query = document.getElementById('client-search').value.toLowerCase().trim();
-            
-            // 过滤客户端
+
             let list = rawMetrics.clients.list;
             if (query) {
-                list = list.filter(c => 
-                    c.clientId.toLowerCase().includes(query) || 
+                list = list.filter(c =>
+                    c.clientId.toLowerCase().includes(query) ||
                     (c.username && c.username.toLowerCase().includes(query))
                 );
             }
 
-            // 计算分页
             const totalRecords = list.length;
             const totalPages = Math.max(1, Math.ceil(totalRecords / clientsPageSize));
-            
+
             if (clientsPage > totalPages) clientsPage = totalPages;
-            
+
             const startIdx = (clientsPage - 1) * clientsPageSize;
             const paginatedList = list.slice(startIdx, startIdx + clientsPageSize);
 
-            // 更新页码控制
             document.getElementById('clients-page-num').textContent = clientsPage;
             document.getElementById('clients-total-pages').textContent = totalPages;
             document.getElementById('clients-total-records').textContent = totalRecords;
@@ -1967,7 +1726,7 @@
                     <td class="code-text">${c.lastActivityAt}</td>
                     <td>
                         <div class="sub-tag-container">
-                            ${c.subscriptions.length === 0 
+                            ${c.subscriptions.length === 0
                                 ? '<span class="code-text" style="color: var(--text-muted)">无订阅主题</span>'
                                 : c.subscriptions.map(topic => `<span class="sub-tag">${topic}</span>`).join('')}
                         </div>
@@ -1995,39 +1754,27 @@
         }
 
         function nextClientsPage() {
+            if (!rawMetrics) return;
             if (clientsPage < Math.ceil(rawMetrics.clients.list.length / clientsPageSize)) {
                 clientsPage++;
                 renderOnlineClientsTable();
             }
         }
 
-        // ==================== 连接与订阅历史物理分页 (SQLite API) ====================
         async function fetchConnectionHistory() {
             const search = document.getElementById('history-search').value.trim();
             const eventFilter = historyEventFilter === 'ALL' ? '' : historyEventFilter;
 
             const tbody = document.getElementById('history-table-body');
-            tbody.innerHTML = `<tr><td colspan="6" class="empty-state"><i class="fa-solid fa-spinner fa-spin"></i><span>正在从 SQLite 拉取审计记录...</span></td></tr>`;
-
-            if (demoMode) {
-                // 模拟本地过滤与分页
-                let list = demoConnectionLogs;
-                if (eventFilter) list = list.filter(l => l.event === eventFilter);
-                if (search) {
-                    const q = search.toLowerCase();
-                    list = list.filter(l => l.clientId.toLowerCase().includes(q) || (l.username && l.username.toLowerCase().includes(q)) || l.details.toLowerCase().includes(q));
-                }
-
-                renderHistoryUI(list.length, list.slice((historyPage - 1) * historyPageSize, historyPage * historyPageSize));
-                return;
-            }
 
             try {
                 const url = `/api/clients/history?page=${historyPage}&pageSize=${historyPageSize}&search=${encodeURIComponent(search)}&eventType=${encodeURIComponent(eventFilter)}`;
                 const response = await fetch(url);
                 if (response.ok) {
                     const data = await response.json();
-                    renderHistoryUI(data.totalCount, data.items);
+                    renderHistoryUI(data.total || data.totalCount, data.items);
+                } else {
+                    tbody.innerHTML = `<tr><td colspan="6" class="empty-state" style="color: var(--color-danger);"><i class="fa-solid fa-triangle-exclamation"></i><span>网络数据拉取失败，请检查主服务连接。</span></td></tr>`;
                 }
             } catch (err) {
                 console.error('拉取连接历史失败:', err);
@@ -2125,26 +1872,15 @@
             const statusFilter = messagesStatusFilter === 'ALL' ? '' : messagesStatusFilter;
 
             const tbody = document.getElementById('messages-table-body');
-            tbody.innerHTML = `<tr><td colspan="8" class="empty-state"><i class="fa-solid fa-spinner fa-spin"></i><span>正在从 SQLite 检索审计日志...</span></td></tr>`;
-
-            if (demoMode) {
-                let list = demoLogs;
-                if (statusFilter) list = list.filter(l => l.status === statusFilter);
-                if (search) {
-                    const q = search.toLowerCase();
-                    list = list.filter(l => l.messageId.toLowerCase().includes(q) || l.topic.toLowerCase().includes(q) || l.sourceClientId.toLowerCase().includes(q));
-                }
-
-                renderMessagesUI(list.length, list.slice((messagesPage - 1) * messagesPageSize, messagesPage * messagesPageSize));
-                return;
-            }
 
             try {
                 const url = `/api/messages?page=${messagesPage}&pageSize=${messagesPageSize}&search=${encodeURIComponent(search)}&status=${encodeURIComponent(statusFilter)}`;
                 const response = await fetch(url);
                 if (response.ok) {
                     const data = await response.json();
-                    renderMessagesUI(data.totalCount, data.items);
+                    renderMessagesUI(data.total || data.totalCount, data.items);
+                } else {
+                    tbody.innerHTML = `<tr><td colspan="8" class="empty-state" style="color: var(--color-danger);"><i class="fa-solid fa-triangle-exclamation"></i><span>网络数据拉取失败，请检查主服务连接。</span></td></tr>`;
                 }
             } catch (err) {
                 console.error('拉取消息审计日志失败:', err);
@@ -2231,18 +1967,6 @@
             const search = document.getElementById('dlq-search').value.trim();
 
             const tbody = document.getElementById('dlq-table-body');
-            tbody.innerHTML = `<tr><td colspan="7" class="empty-state"><i class="fa-solid fa-spinner fa-spin"></i><span>正在从 SQLite 检索死信物理归档...</span></td></tr>`;
-
-            if (demoMode) {
-                let list = demoLogs.filter(l => l.status === 'DeadLetter');
-                if (search) {
-                    const q = search.toLowerCase();
-                    list = list.filter(l => l.messageId.toLowerCase().includes(q) || l.topic.toLowerCase().includes(q) || l.sourceClientId.toLowerCase().includes(q));
-                }
-
-                renderDlqUI(list.length, list.slice((dlqPage - 1) * dlqPageSize, dlqPage * dlqPageSize));
-                return;
-            }
 
             try {
                 // 死信专属查询：强制限制 status = DeadLetter，极速响应
@@ -2250,7 +1974,9 @@
                 const response = await fetch(url);
                 if (response.ok) {
                     const data = await response.json();
-                    renderDlqUI(data.totalCount, data.items);
+                    renderDlqUI(data.total || data.totalCount, data.items);
+                } else {
+                    tbody.innerHTML = `<tr><td colspan="7" class="empty-state" style="color: var(--color-danger);"><i class="fa-solid fa-triangle-exclamation"></i><span>网络数据拉取失败，请检查主服务连接。</span></td></tr>`;
                 }
             } catch (err) {
                 console.error('拉取死信审计失败:', err);
@@ -2325,9 +2051,7 @@
         function openMessageDetail(messageId) {
             let log = null;
 
-            if (demoMode) {
-                log = demoLogs.find(l => l.messageId === messageId);
-            } else if (rawMetrics) {
+            if (rawMetrics) {
                 // 先尝试从内存最新中检索
                 log = rawMetrics.logs.find(l => l.messageId === messageId);
             }
@@ -2390,35 +2114,17 @@
             const payloadCodeBox = document.getElementById('drawer-msg-payload');
             payloadCodeBox.textContent = "正在解密有效载荷内容...";
 
-            if (demoMode) {
-                // 演示模式生成随机可读 JSON
-                setTimeout(() => {
-                    const mockJson = {
-                        deviceId: log.sourceClientId,
-                        timestamp: Date.now(),
-                        metrics: {
-                            temperature: Math.round(18 + Math.random() * 15, 2),
-                            humidity: Math.round(40 + Math.random() * 30, 2),
-                            voltage: Math.round(210 + Math.random() * 20, 2)
-                        },
-                        network: {
-                            rssi: -Math.floor(50 + Math.random() * 40),
-                            latency: Math.floor(5 + Math.random() * 50)
-                        }
-                    };
-                    payloadCodeBox.textContent = JSON.stringify(mockJson, null, 4);
-                    payloadCodeBox.style.color = '#10b981';
-                }, 200);
-                return;
-            }
-
             // 从 Minimal API 实时拉取数据库中保留的消息 Payload 实体
             fetch(`/api/payload/${log.messageId}`)
                 .then(res => {
-                    if (res.ok) return res.text();
+                    if (res.ok) return res.json();
                     return null;
                 })
-                .then(payloadText => {
+                .then(apiData => {
+                    let payloadText = null;
+                    if (apiData && typeof apiData === 'object' && apiData.hasOwnProperty('payload')) {
+                        payloadText = apiData.payload;
+                    }
                     if (!payloadText && log.payload) {
                         payloadText = log.payload; // 降级使用 logs 审计数据自带的 payload 缓存
                     }
@@ -2439,8 +2145,21 @@
                     }
                 })
                 .catch(() => {
-                    payloadCodeBox.textContent = `[历史数据库中的 Payload 大小为: ${log.payloadSize} 字节]`;
-                    payloadCodeBox.style.color = 'var(--text-muted)';
+                    // 网络异常或 API 报错时，尝试使用 log.payload 作为最后的备份
+                    let payloadText = log.payload;
+                    if (payloadText) {
+                        try {
+                            const parsed = JSON.parse(payloadText);
+                            payloadCodeBox.textContent = JSON.stringify(parsed, null, 4);
+                            payloadCodeBox.style.color = '#34d399';
+                        } catch (e) {
+                            payloadCodeBox.textContent = payloadText;
+                            payloadCodeBox.style.color = 'var(--color-cyan)';
+                        }
+                    } else {
+                        payloadCodeBox.textContent = `[历史数据库中的 Payload 大小为: ${log.payloadSize} 字节]`;
+                        payloadCodeBox.style.color = 'var(--text-muted)';
+                    }
                 });
         }
 

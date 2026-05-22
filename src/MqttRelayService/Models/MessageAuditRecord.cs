@@ -1,15 +1,18 @@
 using System;
+using SqlSugar;
 
 namespace MqttRelayService.Models
 {
     /// <summary>
     /// 消息审计记录，用于 SQLite 物理持久化存储
     /// </summary>
+    [SugarTable("message_audit")]
     public class MessageAuditRecord
     {
         /// <summary>
         /// 消息唯一 ID
         /// </summary>
+        [SugarColumn(IsPrimaryKey = true)]
         public string MessageId { get; set; } = string.Empty;
 
         /// <summary>

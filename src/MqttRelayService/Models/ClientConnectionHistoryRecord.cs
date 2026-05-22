@@ -1,15 +1,18 @@
 using System;
+using SqlSugar;
 
 namespace MqttRelayService.Models
 {
     /// <summary>
     /// 客户端设备连接与订阅历史记录，用于 SQLite 物理持久化存储
     /// </summary>
+    [SugarTable("client_connection_history")]
     public class ClientConnectionHistoryRecord
     {
         /// <summary>
         /// 自增唯一标识
         /// </summary>
+        [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
         public long Id { get; set; }
 
         /// <summary>

@@ -33,6 +33,7 @@ namespace MqttRelayService.Tests
         });
 
         private readonly Mock<ILogger<InMemoryMessageQueue>> _mockQueueLogger = new();
+        private readonly Mock<ISqliteAuditRepository> _mockAuditRepository = new();
         private readonly InMemoryMessageQueue _queue;
 
         public DashboardMetricsTests()
@@ -221,6 +222,60 @@ namespace MqttRelayService.Tests
             Assert.Equal("msg_dlq", (string)log.MessageId);
             Assert.Equal("DeadLetter", (string)log.Status);
             Assert.Equal("Auth failed", (string)log.ErrorMessage);
+        }
+
+        [Fact]
+        public async Task MetricsService_GetDashboardDataAsync_WithAuditRepository_ShouldPreferAuditAlignedSummary()
+        {
+            var now = DateTime.UtcNow;
+            _mockAuditRepository
+                .Setup(r => r.GetDashboardMessageSummaryAsync(100))
+                .ReturnsAsync((
+                    TotalMessages: 12,
+                    TotalSucceeded: 8,
+                    TotalFailed: 3,
+                    TotalDeadLetter: 1,
+                    RecentItems: (IReadOnlyList<MessageAuditRecord>)new List<MessageAuditRecord>
+                    {
+                        new()
+                        {
+                            MessageId = "audit_1",
+                            Topic = "audit/topic",
+                            SourceClientId = "audit_client",
+                            PayloadSize = 16,
+                            Payload = "payload",
+                            Qos = 1,
+                            Retain = false,
+                            Status = "Succeeded",
+                            LatencyMs = 12.5,
+                            RetryCount = 0,
+                            CreatedAt = now,
+                            UpdatedAt = now
+                        }
+                    }));
+
+            using var metricsService = new MetricsService(
+                _queue,
+                _mockClientRegistry.Object,
+                _serviceOptions,
+                _mqttOptions,
+                _reliabilityOptions,
+                _mockAuditRepository.Object,
+                _mockLogger.Object);
+
+            var result = await metricsService.GetDashboardDataAsync();
+
+            dynamic data = result;
+            Assert.Equal(12L, (long)data.Counters.TotalReceived);
+            Assert.Equal(8L, (long)data.Counters.TotalSucceeded);
+            Assert.Equal(3L, (long)data.Counters.TotalFailed);
+            Assert.Equal(1L, (long)data.Counters.TotalDeadLetter);
+
+            var logs = (List<object>)data.Logs;
+            Assert.Single(logs);
+            dynamic log = logs[0];
+            Assert.Equal("audit_1", (string)log.MessageId);
+            Assert.Equal("Succeeded", (string)log.Status);
         }
 
         [Fact]

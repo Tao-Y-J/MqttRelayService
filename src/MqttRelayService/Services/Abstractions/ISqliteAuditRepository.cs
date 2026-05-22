@@ -48,6 +48,13 @@ namespace MqttRelayService.Services.Abstractions
             string? eventType = null,
             string? search = null);
 
+        Task<(
+            int TotalMessages,
+            int TotalSucceeded,
+            int TotalFailed,
+            int TotalDeadLetter,
+            IReadOnlyList<MessageAuditRecord> RecentItems)> GetDashboardMessageSummaryAsync(int recentCount);
+
         /// <summary>
         /// 清理历史数据，保持数据库在健康大小区间
         /// </summary>
