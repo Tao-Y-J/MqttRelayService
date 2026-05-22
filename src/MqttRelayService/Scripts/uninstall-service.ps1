@@ -153,6 +153,7 @@ foreach ($service in $services) {
             Write-Host "[步骤] 正在清理 Windows 防火墙入站规则..."
             $ruleNames = @(
                 "$($service.Name)-MQTT",
+                "$($service.Name)-Web",
                 "$($service.Name)-API",
                 "$($service.Name)-Dashboard"
             )

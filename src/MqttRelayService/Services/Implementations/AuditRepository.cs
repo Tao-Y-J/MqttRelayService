@@ -40,7 +40,7 @@ namespace MqttRelayService.Services.Implementations
             _db = new SqlSugarScope(new ConnectionConfig
             {
                 DbType = ParseDbType(options.Provider),
-                ConnectionString = options.ConnectionString,
+                ConnectionString = BuildConnectionString(options, _sqliteDataSourcePath),
                 IsAutoCloseConnection = true
             });
         }
@@ -86,6 +86,16 @@ namespace MqttRelayService.Services.Implementations
             }
 
             return null;
+        }
+
+        private static string BuildConnectionString(AuditStorageOptions options, string? sqliteDataSourcePath)
+        {
+            if (ParseDbType(options.Provider) != DbType.Sqlite || string.IsNullOrWhiteSpace(sqliteDataSourcePath))
+            {
+                return options.ConnectionString;
+            }
+
+            return $"Data Source={sqliteDataSourcePath}";
         }
 
         private async Task EnsureSchemaAsync()

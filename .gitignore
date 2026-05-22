@@ -32,6 +32,12 @@ bld/
 [Oo]ut/
 [Ll]og/
 [Ll]ogs/
+audit.db
+audit.db-shm
+audit.db-wal
+data/audit.db
+data/audit.db-shm
+data/audit.db-wal
 
 # Visual Studio 2015/2017 cache/options directory
 .vs/
@@ -364,3 +370,5 @@ FodyWeavers.xsd
 
 # MQTT Relay Service Runtime Data
 src/MqttRelayService/data/
+/stress_mqtt_1883.py
+/.codex/documents/03-历史任务记录/2026-05-23-独立Python压测脚本.md

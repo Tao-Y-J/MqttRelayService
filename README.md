@@ -110,11 +110,15 @@ Scripts\uninstall-service.cmd
     "DropWhenQueueFull": false
   },
   "AuditStorage": {
-    "Provider": "SqlServer",
-    "ConnectionString": "Server=127.0.0.1;Database=MqttRelayService;User Id=mqttrelay;Password=ChangeMe123!;TrustServerCertificate=True;",
+    "Provider": "Sqlite",
+    "ConnectionString": "Data Source=data/audit.db",
     "AutoInitializeSchema": true,
     "MessageRetentionCount": 20000,
     "ClientHistoryRetentionCount": 5000
+  },
+  "Web": {
+    "Enabled": true,
+    "Port": 5000
   },
   "Serilog": {
     "FileNamePrefix": "relay",
@@ -150,11 +154,13 @@ Scripts\uninstall-service.cmd
 | **AuditStorage** | `AutoInitializeSchema` | 是否在启动时自动初始化审计表结构 |
 | **AuditStorage** | `MessageRetentionCount` | 消息审计自动清理保留上限 |
 | **AuditStorage** | `ClientHistoryRetentionCount` | 客户端历史自动清理保留上限 |
+| **Web** | `Enabled` | 是否启用统一 Web 管理面 |
+| **Web** | `Port` | 统一 Web 监听端口，Dashboard 与 API 共用 |
 | **Serilog** | `RetentionDays` | 日志文件保留天数 |
 
 停机排空使用 `ShutdownDrainTimeoutMs` 作为总超时。当前默认配置已将 `ShutdownDrainTimeoutMs` 设置为 `30000ms`，与默认 `RetryMaxDelayMs` 一致。停机 drain 阶段遇到失败消息时会同步等待该次退避结束后再尝试重新入队；如果将 `ShutdownDrainTimeoutMs` 调小到 `RetryMaxDelayMs` 以下，排空超时会先触发，消息将按当前逻辑保留回队列或转入死信收敛，不再继续当次下一次注入尝试。
 
-本地开发默认可在 `appsettings.Development.json` 中使用 SQLite 连接串；正式环境应在 `appsettings.json` 或部署环境变量中提供正式数据库的 `AuditStorage` 配置。
+默认使用 SQLite 审计库存储，连接串 `Data Source=data/audit.db` 会被解析到运行目录下的 `data` 目录；如果数据库文件不存在，启动时会自动创建目录、建库并初始化表结构。
 
 ## Topic 规范
 

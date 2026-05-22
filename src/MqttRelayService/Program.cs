@@ -61,7 +61,7 @@ namespace MqttRelayService
                 builder.Services.AddSingleton<ThroughputController>();
                 builder.Services.AddSingleton<IAuthService, AuthService>();
 
-                if (webOptions.EnableMetricsApi)
+                if (webOptions.Enabled)
                 {
                     builder.Services.AddSingleton<IAuditRepository, AuditRepository>();
                     builder.Services.AddSingleton<IMetricsService, MetricsService>();
@@ -105,28 +105,24 @@ namespace MqttRelayService
 
                 RegisterHostedServices(builder.Services);
 
-                if (webOptions.EnableMetricsApi)
+                if (webOptions.Enabled)
                 {
                     builder.WebHost.ConfigureKestrel(kestrel =>
                     {
-                        kestrel.ListenAnyIP(webOptions.MetricsApiPort);
-                        if (webOptions.EnableDashboard)
-                        {
-                            kestrel.ListenAnyIP(webOptions.DashboardPort);
-                        }
+                        kestrel.ListenAnyIP(webOptions.Port);
                     });
                 }
 
                 var app = builder.Build();
 
-                if (webOptions.EnableMetricsApi)
+                if (webOptions.Enabled)
                 {
                     using var scope = app.Services.CreateScope();
                     var auditRepository = scope.ServiceProvider.GetRequiredService<IAuditRepository>();
                     auditRepository.InitializeAsync().GetAwaiter().GetResult();
                 }
 
-                if (webOptions.EnableMetricsApi)
+                if (webOptions.Enabled)
                 {
                     app.MapGet("/api/metrics", async (IMetricsService metricsService) =>
                     {
@@ -245,7 +241,7 @@ namespace MqttRelayService
                     });
                 }
 
-                if (webOptions.EnableMetricsApi && webOptions.EnableDashboard)
+                if (webOptions.Enabled)
                 {
                     var staticFilesDir = Path.Combine(AppContext.BaseDirectory, "wwwroot");
                     if (!Directory.Exists(staticFilesDir))
