@@ -109,6 +109,13 @@ Scripts\uninstall-service.cmd
     "ShutdownDrainTimeoutMs": 30000,
     "DropWhenQueueFull": false
   },
+  "AuditStorage": {
+    "Provider": "SqlServer",
+    "ConnectionString": "Server=127.0.0.1;Database=MqttRelayService;User Id=mqttrelay;Password=ChangeMe123!;TrustServerCertificate=True;",
+    "AutoInitializeSchema": true,
+    "MessageRetentionCount": 20000,
+    "ClientHistoryRetentionCount": 5000
+  },
   "Serilog": {
     "FileNamePrefix": "relay",
     "RetentionDays": 30,
@@ -138,9 +145,16 @@ Scripts\uninstall-service.cmd
 | **Reliability** | `ShutdownDrainTimeoutMs` | 停机时队列排空超时（毫秒） |
 | **Reliability** | `EnableDeadLetter` | 是否启用死信记录 |
 | **Reliability** | `DeadLetterPath` | 死信文件存储目录 |
+| **AuditStorage** | `Provider` | 审计持久化数据库提供程序，直接填写 `SqlSugar DbType` 名称，例如 `Sqlite`、`SqlServer`、`MySql`、`PostgreSQL`、`Oracle`、`Dm` |
+| **AuditStorage** | `ConnectionString` | 审计持久化数据库连接字符串 |
+| **AuditStorage** | `AutoInitializeSchema` | 是否在启动时自动初始化审计表结构 |
+| **AuditStorage** | `MessageRetentionCount` | 消息审计自动清理保留上限 |
+| **AuditStorage** | `ClientHistoryRetentionCount` | 客户端历史自动清理保留上限 |
 | **Serilog** | `RetentionDays` | 日志文件保留天数 |
 
 停机排空使用 `ShutdownDrainTimeoutMs` 作为总超时。当前默认配置已将 `ShutdownDrainTimeoutMs` 设置为 `30000ms`，与默认 `RetryMaxDelayMs` 一致。停机 drain 阶段遇到失败消息时会同步等待该次退避结束后再尝试重新入队；如果将 `ShutdownDrainTimeoutMs` 调小到 `RetryMaxDelayMs` 以下，排空超时会先触发，消息将按当前逻辑保留回队列或转入死信收敛，不再继续当次下一次注入尝试。
+
+本地开发默认可在 `appsettings.Development.json` 中使用 SQLite 连接串；正式环境应在 `appsettings.json` 或部署环境变量中提供正式数据库的 `AuditStorage` 配置。
 
 ## Topic 规范
 
@@ -185,7 +199,6 @@ Scripts\uninstall-service.cmd
 - Retained Message 的磁盘持久化
 - 集群部署或多节点桥接
 - 连接外部 MQTT Broker（桥接模式）
-- Web 管理后台
 - 严格按客户端级别的点对点直投（当前采用 Topic 注入 + 出站拦截实现）
 - 完整的 ACL（访问控制列表），当前仅支持基于预设用户的简单认证
 - MQTT 3.1.1 下的 `EchoToSender=false` 兼容（当前依赖 MQTT 5.0 User Properties）

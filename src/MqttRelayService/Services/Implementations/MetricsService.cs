@@ -27,7 +27,7 @@ namespace MqttRelayService.Services.Implementations
         private readonly ServiceOptions _serviceOptions;
         private readonly MqttOptions _mqttOptions;
         private readonly ReliabilityOptions _reliabilityOptions;
-        private readonly ISqliteAuditRepository? _auditRepository;
+        private readonly IAuditRepository? _auditRepository;
         private readonly ILogger<MetricsService> _logger;
 
         // 原子计数器
@@ -83,7 +83,7 @@ namespace MqttRelayService.Services.Implementations
             IOptions<ServiceOptions> serviceOptions,
             IOptions<MqttOptions> mqttOptions,
             IOptions<ReliabilityOptions> reliabilityOptions,
-            ISqliteAuditRepository? auditRepository,
+            IAuditRepository? auditRepository,
             ILogger<MetricsService> logger)
         {
             _queue = queue;
@@ -123,7 +123,7 @@ namespace MqttRelayService.Services.Implementations
                 SystemTimestamp = DateTime.UtcNow
             });
 
-            // 写入 SQLite 物理数据库（采用非阻塞 Task.Run）
+            // 写入审计持久化（采用非阻塞 Task.Run）
             var record = new MessageAuditRecord
             {
                 MessageId = message.MessageId,
@@ -190,7 +190,7 @@ namespace MqttRelayService.Services.Implementations
                 SystemTimestamp = DateTime.UtcNow
             });
 
-            // 写入 SQLite 物理数据库（采用非阻塞 Task.Run）
+            // 写入审计持久化（采用非阻塞 Task.Run）
             var record = new MessageAuditRecord
             {
                 MessageId = context.MessageId,
@@ -249,7 +249,7 @@ namespace MqttRelayService.Services.Implementations
                 SystemTimestamp = DateTime.UtcNow
             });
 
-            // 写入 SQLite 物理数据库（采用非阻塞 Task.Run）
+            // 写入审计持久化（采用非阻塞 Task.Run）
             var auditRecord = new MessageAuditRecord
             {
                 MessageId = record.MessageId,

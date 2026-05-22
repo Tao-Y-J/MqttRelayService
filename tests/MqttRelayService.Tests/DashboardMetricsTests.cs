@@ -33,7 +33,7 @@ namespace MqttRelayService.Tests
         });
 
         private readonly Mock<ILogger<InMemoryMessageQueue>> _mockQueueLogger = new();
-        private readonly Mock<ISqliteAuditRepository> _mockAuditRepository = new();
+        private readonly Mock<IAuditRepository> _mockAuditRepository = new();
         private readonly InMemoryMessageQueue _queue;
 
         public DashboardMetricsTests()

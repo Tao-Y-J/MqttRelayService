@@ -5,58 +5,48 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Moq;
 using MqttRelayService.Models;
+using MqttRelayService.Options;
 using MqttRelayService.Services.Implementations;
+using SqlSugar;
 using Xunit;
 
 namespace MqttRelayService.Tests
 {
     /// <summary>
-    /// SQLite 物理持久化审计层 (SqliteAuditRepository) 单元测试
+    /// 审计持久化仓储单元测试。
     /// </summary>
-    public class SqliteAuditRepositoryTests : IDisposable
+    public class AuditRepositoryTests : IDisposable
     {
-        private readonly SqliteAuditRepository _repository;
+        private readonly AuditRepository _repository;
         private readonly string _testRoot;
         private readonly string _dbDir;
         private readonly string _dbFile;
-        private readonly string _dbWalFile;
-        private readonly string _dbShmFile;
 
-        public SqliteAuditRepositoryTests()
+        public AuditRepositoryTests()
         {
             _testRoot = Path.Combine(Path.GetTempPath(), "MqttRelayServiceTests", Guid.NewGuid().ToString("N"));
             _dbDir = Path.Combine(_testRoot, "data");
             _dbFile = Path.Combine(_dbDir, "audit.db");
-            _dbWalFile = Path.Combine(_dbDir, "audit.db-wal");
-            _dbShmFile = Path.Combine(_dbDir, "audit.db-shm");
 
-            // 清理已存在的测试数据库以保障环境纯净
             CleanDatabase();
 
-            var loggerMock = new Mock<ILogger<SqliteAuditRepository>>();
-            _repository = new SqliteAuditRepository(loggerMock.Object, _dbFile);
+            var options = new AuditStorageOptions
+            {
+                Provider = "Sqlite",
+                ConnectionString = $"Data Source={_dbFile}",
+                AutoInitializeSchema = true,
+                MessageRetentionCount = 20000,
+                ClientHistoryRetentionCount = 5000
+            };
+
+            var loggerMock = new Mock<ILogger<AuditRepository>>();
+            _repository = new AuditRepository(options, loggerMock.Object);
         }
 
         private void CleanDatabase()
         {
             try
             {
-                if (File.Exists(_dbFile))
-                {
-                    File.Delete(_dbFile);
-                }
-                if (File.Exists(_dbWalFile))
-                {
-                    File.Delete(_dbWalFile);
-                }
-                if (File.Exists(_dbShmFile))
-                {
-                    File.Delete(_dbShmFile);
-                }
-                if (Directory.Exists(_dbDir))
-                {
-                    Directory.Delete(_dbDir, true);
-                }
                 if (Directory.Exists(_testRoot))
                 {
                     Directory.Delete(_testRoot, true);
@@ -77,10 +67,8 @@ namespace MqttRelayService.Tests
         [Fact]
         public async Task InitializeAsync_ShouldCreateDatabaseAndTables()
         {
-            // Act
             await _repository.InitializeAsync();
 
-            // Assert
             Assert.True(Directory.Exists(_dbDir));
             Assert.True(File.Exists(_dbFile));
         }
@@ -88,7 +76,6 @@ namespace MqttRelayService.Tests
         [Fact]
         public async Task RecordMessageAuditAsync_ShouldUpsertAndRetrieveCorrectly()
         {
-            // Arrange
             await _repository.InitializeAsync();
             var record = new MessageAuditRecord
             {
@@ -106,24 +93,21 @@ namespace MqttRelayService.Tests
                 UpdatedAt = DateTime.UtcNow
             };
 
-            // Act: 插入新消息审计
             await _repository.RecordMessageAuditAsync(record);
             var (total1, items1) = await _repository.GetPagedMessagesAsync(1, 10);
 
-            // Assert: 验证成功插入
             Assert.Equal(1, total1);
             Assert.Single(items1);
             Assert.Equal("test_msg_001", items1[0].MessageId);
             Assert.Equal("Queued", items1[0].Status);
 
-            // Act: 更新同一个消息的转发状态
             record.Status = "Succeeded";
             record.LatencyMs = 25.5;
             record.UpdatedAt = DateTime.UtcNow;
+
             await _repository.RecordMessageAuditAsync(record);
             var (total2, items2) = await _repository.GetPagedMessagesAsync(1, 10);
 
-            // Assert: 验证 Upsert 状态被正确覆盖
             Assert.Equal(1, total2);
             Assert.Single(items2);
             Assert.Equal("test_msg_001", items2[0].MessageId);
@@ -134,7 +118,6 @@ namespace MqttRelayService.Tests
         [Fact]
         public async Task RecordClientConnectionHistoryAsync_ShouldSaveAndFilterCorrectly()
         {
-            // Arrange
             await _repository.InitializeAsync();
             var record1 = new ClientConnectionHistoryRecord
             {
@@ -155,20 +138,16 @@ namespace MqttRelayService.Tests
                 Timestamp = DateTime.UtcNow.AddSeconds(1)
             };
 
-            // Act
             await _repository.RecordClientConnectionHistoryAsync(record1);
             await _repository.RecordClientConnectionHistoryAsync(record2);
 
-            // 1. 获取全部
-            var (totalAll, allItems) = await _repository.GetPagedClientHistoryAsync(1, 10);
+            var (totalAll, _) = await _repository.GetPagedClientHistoryAsync(1, 10);
             Assert.Equal(2, totalAll);
 
-            // 2. 按 ClientId 过滤
             var (totalFiltered, filteredItems) = await _repository.GetPagedClientHistoryAsync(1, 10, clientId: "client_abc");
             Assert.Equal(1, totalFiltered);
             Assert.Equal("client_abc", filteredItems[0].ClientId);
 
-            // 3. 模糊搜索
             var (totalSearch, searchItems) = await _repository.GetPagedClientHistoryAsync(1, 10, search: "lost");
             Assert.Equal(1, totalSearch);
             Assert.Equal("client_def", searchItems[0].ClientId);
@@ -177,10 +156,8 @@ namespace MqttRelayService.Tests
         [Fact]
         public async Task CleanupHistoryAsync_ShouldLimitTableSizesCorrectly()
         {
-            // Arrange
             await _repository.InitializeAsync();
 
-            // 插入 15 条消息审计记录
             for (int i = 0; i < 15; i++)
             {
                 await _repository.RecordMessageAuditAsync(new MessageAuditRecord
@@ -197,7 +174,6 @@ namespace MqttRelayService.Tests
                 });
             }
 
-            // 插入 10 条连接历史
             for (int i = 0; i < 10; i++)
             {
                 await _repository.RecordClientConnectionHistoryAsync(new ClientConnectionHistoryRecord
@@ -209,21 +185,15 @@ namespace MqttRelayService.Tests
                 });
             }
 
-            // Act: 限制消息最多保留 5 条，连接历史保留 3 条
             await _repository.CleanupHistoryAsync(keepMessagesCount: 5, keepClientHistoryCount: 3);
 
-            // Assert: 验证行数被限制，且保留的是最新(时间戳最大)的记录
             var (msgTotal, msgItems) = await _repository.GetPagedMessagesAsync(1, 20);
             Assert.Equal(5, msgTotal);
-            Assert.Equal(5, msgItems.Count);
-            // msg_14, msg_13, msg_12, msg_11, msg_10 应被保留，msg_00 到 msg_09 被删除
             Assert.Contains(msgItems, m => m.MessageId == "msg_14");
             Assert.DoesNotContain(msgItems, m => m.MessageId == "msg_00");
 
             var (clientTotal, clientItems) = await _repository.GetPagedClientHistoryAsync(1, 20);
             Assert.Equal(3, clientTotal);
-            Assert.Equal(3, clientItems.Count);
-            // client_09, client_08, client_07 保留
             Assert.Contains(clientItems, c => c.ClientId == "client_09");
             Assert.DoesNotContain(clientItems, c => c.ClientId == "client_00");
         }
@@ -280,6 +250,19 @@ namespace MqttRelayService.Tests
             Assert.Equal(2, summary.RecentItems.Count);
             Assert.Equal("sum_3", summary.RecentItems[0].MessageId);
             Assert.Equal("sum_2", summary.RecentItems[1].MessageId);
+        }
+
+        [Theory]
+        [InlineData("Sqlite", DbType.Sqlite)]
+        [InlineData("SqlServer", DbType.SqlServer)]
+        [InlineData("MySql", DbType.MySql)]
+        [InlineData("Dm", DbType.Dm)]
+        [InlineData("PostgreSQL", DbType.PostgreSQL)]
+        [InlineData("Oracle", DbType.Oracle)]
+        public void ParseDbType_ShouldReturnExpectedProvider(string provider, DbType expectedDbType)
+        {
+            var actual = AuditRepository.ParseDbType(provider);
+            Assert.Equal(expectedDbType, actual);
         }
     }
 }

@@ -985,7 +985,7 @@
             </div>
         </div>
 
-        <!-- 3. 连接与订阅历史视图 (SQLite 物理持久化) -->
+        <!-- 3. 连接与订阅历史视图（审计持久化） -->
         <div id="tab-history" class="tab-content">
             <div class="panel">
                 <div class="panel-header">
@@ -1031,7 +1031,7 @@
                         </table>
                     </div>
                 </div>
-                <!-- SQLite 服务端物理分页控件 -->
+                <!-- 审计历史服务端分页控件 -->
                 <div class="pagination-container" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--border-muted);">
                     <div style="font-size: 0.85rem; color: var(--text-secondary);">
                         第 <span id="history-page-num" class="code-bold" style="color: var(--color-cyan);">1</span> 页 / 共 <span id="history-total-pages" class="code-bold">1</span> 页，共 <span id="history-total-records" class="code-bold">0</span> 条记录
@@ -1050,7 +1050,7 @@
             </div>
         </div>
 
-        <!-- 4. 消息日志视图 (SQLite 物理持久化) -->
+        <!-- 4. 消息日志视图（审计持久化） -->
         <div id="tab-messages" class="tab-content">
             <div class="panel">
                 <div class="panel-header">
@@ -1102,7 +1102,7 @@
                         </table>
                     </div>
                 </div>
-                <!-- SQLite 服务端物理分页控件 -->
+                <!-- 审计历史服务端分页控件 -->
                 <div class="pagination-container" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--border-muted);">
                     <div style="font-size: 0.85rem; color: var(--text-secondary);">
                         第 <span id="messages-page-num" class="code-bold" style="color: var(--color-cyan);">1</span> 页 / 共 <span id="messages-total-pages" class="code-bold">1</span> 页，共 <span id="messages-total-records" class="code-bold">0</span> 条记录
@@ -1162,7 +1162,7 @@
                         </table>
                     </div>
                 </div>
-                <!-- SQLite 服务端物理分页控件 -->
+                <!-- 审计历史服务端分页控件 -->
                 <div class="pagination-container" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--border-muted);">
                     <div style="font-size: 0.85rem; color: var(--text-secondary);">
                         第 <span id="dlq-page-num" class="code-bold" style="color: var(--color-cyan);">1</span> 页 / 共 <span id="dlq-total-pages" class="code-bold">1</span> 页，共 <span id="dlq-total-records" class="code-bold">0</span> 条记录
@@ -1252,15 +1252,15 @@
                     </div>
                 </div>
 
-                <!-- SQLite 数据库状态卡片 -->
+                <!-- 审计存储状态卡片 -->
                 <div class="panel">
                     <div class="panel-header">
-                        <span class="panel-title"><i class="fa-solid fa-database"></i> SQLite 物理审计数据库</span>
+                        <span class="panel-title"><i class="fa-solid fa-database"></i> 审计持久化存储</span>
                     </div>
                     <div class="sys-property-list">
                         <div class="sys-property-item">
                             <span class="sys-property-name">数据库类型</span>
-                            <span class="sys-property-value code-bold" style="color: var(--color-cyan);">SQLite 3 (Physical)</span>
+                            <span class="sys-property-value code-bold" style="color: var(--color-cyan);">Configured Provider</span>
                         </div>
                         <div class="sys-property-item">
                             <span class="sys-property-name">文件存储路径</span>
@@ -1866,7 +1866,7 @@
             }
         }
 
-        // ==================== 消息审计日志物理分页 (SQLite API) ====================
+        // ==================== 消息审计日志分页 ====================
         async function fetchMessagesAudit() {
             const search = document.getElementById('message-search').value.trim();
             const statusFilter = messagesStatusFilter === 'ALL' ? '' : messagesStatusFilter;
@@ -1962,7 +1962,7 @@
             }
         }
 
-        // ==================== 死信落盘审计物理分页 (SQLite API) ====================
+        // ==================== 死信审计分页 ====================
         async function fetchDlqAudit() {
             const search = document.getElementById('dlq-search').value.trim();
 
@@ -2060,7 +2060,7 @@
             if (!log) {
                 // 暂时利用 UI 属性降级，避免阻塞展示
                 document.getElementById('drawer-msg-id').textContent = messageId;
-                document.getElementById('drawer-msg-topic').textContent = "从 SQLite 归档拉取中...";
+                document.getElementById('drawer-msg-topic').textContent = "从审计归档拉取中...";
                 document.getElementById('drawer-msg-src').textContent = "-";
                 document.getElementById('drawer-msg-qos').textContent = "-";
                 document.getElementById('drawer-msg-retain').textContent = "-";

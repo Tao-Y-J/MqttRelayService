@@ -1,47 +1,49 @@
-using System;
+﻿using System;
 using SqlSugar;
 
 namespace MqttRelayService.Models
 {
     /// <summary>
-    /// 客户端设备连接与订阅历史记录，用于 SQLite 物理持久化存储
+    /// 客户端连接与订阅历史持久化模型。
     /// </summary>
     [SugarTable("client_connection_history")]
     public class ClientConnectionHistoryRecord
     {
         /// <summary>
-        /// 自增唯一标识
+        /// 自增唯一标识。
         /// </summary>
         [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
-        public long Id { get; set; }
+        public int Id { get; set; }
 
         /// <summary>
-        /// 客户端唯一 ID (ClientId)
+        /// 客户端唯一 ID。
         /// </summary>
         public string ClientId { get; set; } = string.Empty;
 
         /// <summary>
-        /// 客户端连接用户名 (Username)
+        /// 客户端连接用户名。
         /// </summary>
+        [SugarColumn(IsNullable = true)]
         public string? Username { get; set; }
 
         /// <summary>
-        /// 单次 TCP 连接会话唯一 ID (ConnectionId)
+        /// 单次连接会话唯一 ID。
         /// </summary>
         public string ConnectionId { get; set; } = string.Empty;
 
         /// <summary>
-        /// 事件类型 (Connected, Disconnected, Subscribed, Unsubscribed)
+        /// 事件类型。
         /// </summary>
         public string Event { get; set; } = string.Empty;
 
         /// <summary>
-        /// 附加详细信息 (如订阅的主题、断开连接的原因等)
+        /// 附加说明信息。
         /// </summary>
+        [SugarColumn(IsNullable = true)]
         public string? Details { get; set; }
 
         /// <summary>
-        /// 事件记录时间戳
+        /// 事件记录时间。
         /// </summary>
         public DateTime Timestamp { get; set; }
     }
