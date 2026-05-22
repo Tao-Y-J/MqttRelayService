@@ -20,6 +20,7 @@ namespace MqttRelayService.Services.Implementations
         private readonly IDeadLetterService _deadLetterService;
         private readonly IRetryPolicyProvider _retryPolicy;
         private readonly ReliabilityOptions _options;
+        private readonly ThroughputController _throughputController;
         private readonly ILogger<MessageDeliveryService> _logger;
 
         private readonly object _lifecycleLock = new();
@@ -29,6 +30,9 @@ namespace MqttRelayService.Services.Implementations
         private volatile bool _isStopping;
         private CancellationTokenSource? _cts;
 
+        /// <summary>
+        /// 兼容旧版本的构造函数，主要用于测试
+        /// </summary>
         public MessageDeliveryService(
             IMessageQueue queue,
             IMessageRouter router,
@@ -37,6 +41,19 @@ namespace MqttRelayService.Services.Implementations
             IRetryPolicyProvider retryPolicy,
             IOptions<ReliabilityOptions> options,
             ILogger<MessageDeliveryService> logger)
+            : this(queue, router, brokerHost, deadLetterService, retryPolicy, options, new ThroughputController(), logger)
+        {
+        }
+
+        public MessageDeliveryService(
+            IMessageQueue queue,
+            IMessageRouter router,
+            IMqttBrokerHost brokerHost,
+            IDeadLetterService deadLetterService,
+            IRetryPolicyProvider retryPolicy,
+            IOptions<ReliabilityOptions> options,
+            ThroughputController throughputController,
+            ILogger<MessageDeliveryService> logger)
         {
             _queue = queue;
             _router = router;
@@ -44,7 +61,40 @@ namespace MqttRelayService.Services.Implementations
             _deadLetterService = deadLetterService;
             _retryPolicy = retryPolicy;
             _options = options.Value;
+            _throughputController = throughputController;
             _logger = logger;
+
+            // 订阅动态并发度变更事件，以便在运行期上调并发度时动态增物理消费者线程
+            _throughputController.ConcurrencyChanged += OnConcurrencyChanged;
+        }
+
+        /// <summary>
+        /// 当最大并发度发生变更时的回调，若上调了并发上限，动态增加物理消费者线程
+        /// </summary>
+        private void OnConcurrencyChanged(int newConcurrency)
+        {
+            lock (_lifecycleLock)
+            {
+                if (_cts == null || _isStopping)
+                {
+                    return;
+                }
+
+                // 清理已结束的消费者任务
+                _consumerTasks.RemoveAll(static task => task.IsCompleted);
+
+                // 计算是否需要增加新的消费者任务
+                var needed = newConcurrency - _consumerTasks.Count;
+                if (needed > 0)
+                {
+                    _logger.LogInformation("动态并发度上调至 {NewConcurrency}，正在增物理消费者线程，新增数量 {NeededCount}", newConcurrency, needed);
+                    var runCts = _cts;
+                    for (int i = 0; i < needed; i++)
+                    {
+                        _consumerTasks.Add(Task.Run(() => ConsumeLoopAsync(runCts.Token), runCts.Token));
+                    }
+                }
+            }
         }
 
         /// <summary>
@@ -87,12 +137,18 @@ namespace MqttRelayService.Services.Implementations
                 shouldLogDrainTimeoutWarning = ShouldLogDrainTimeoutConfigurationWarning();
                 runCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 _cts = runCts;
+
+                // 物理池线程数初始仅拉起配置所需的消费者数量（或至少 1 个），以符合启动测试断言
+                // 运行期若在页面调高并发度，将通过 ConcurrencyChanged 事件动态增补物理消费者线程
                 handlerCount = Math.Max(1, _options.MaxConcurrentHandlers);
 
                 for (int i = 0; i < handlerCount; i++)
                 {
                     _consumerTasks.Add(Task.Run(() => ConsumeLoopAsync(runCts.Token), runCts.Token));
                 }
+
+                // 然后初始化吞吐控制器的默认最大并发数，这会触发事件，但此时需要的增补线程为 0，不会重复创建
+                _throughputController.UpdateMaxConcurrency(_options.MaxConcurrentHandlers);
             }
 
             if (shouldLogDrainTimeoutWarning)
@@ -225,8 +281,13 @@ namespace MqttRelayService.Services.Implementations
             {
                 await foreach (var message in _queue.ReadAllAsync(cancellationToken))
                 {
+                    bool acquired = false;
                     try
                     {
+                        // 协调暂停、动态并发和吞吐速率限制
+                        await _throughputController.WaitAsync(cancellationToken);
+                        acquired = true;
+
                         // 处理单条消息，异常隔离
                         await ProcessMessageAsync(message, cancellationToken);
                     }
@@ -239,6 +300,13 @@ namespace MqttRelayService.Services.Implementations
                     {
                         _logger.LogError(ex, "处理消息 {MessageId} 时发生未处理异常，继续执行",
                             message.RouteContext.MessageId);
+                    }
+                    finally
+                    {
+                        if (acquired)
+                        {
+                            _throughputController.Release();
+                        }
                     }
                 }
             }
@@ -342,7 +410,7 @@ namespace MqttRelayService.Services.Implementations
         /// <summary>
         /// 尝试向 Topic 注入消息（由 Broker 分发给匹配订阅者）
         /// </summary>
-        private async Task<bool> TryForwardAsync(RouteContext context, CancellationToken cancellationToken)
+        private async Task<bool> TryForwardAsync(MqttRelayService.Models.RouteContext context, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -351,26 +419,36 @@ namespace MqttRelayService.Services.Implementations
                 using var timeoutCts = new CancellationTokenSource(_options.ForwardTimeoutMs);
                 using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
 
-                var success = await _brokerHost.PublishAsync(
-                    context.Topic,
-                    context.Payload,
-                    context.QoS,
-                    context.SourceClientId,
-                    context.Retain,
-                    linkedCts.Token);
+                MessageContext.CurrentMessageId.Value = context.MessageId;
+                Console.WriteLine($"[DEBUG-MSG] MessageDeliveryService.TryForwardAsync: Set CurrentMessageId.Value = '{MessageContext.CurrentMessageId.Value}' for context.MessageId = '{context.MessageId}'");
 
-                if (success)
+                try
                 {
-                    _logger.LogDebug("消息 {MessageId} 注入 Topic {Topic} 成功",
-                        context.MessageId, context.Topic);
-                }
-                else
-                {
-                    _logger.LogWarning("消息 {MessageId} 注入 Topic {Topic} 失败",
-                        context.MessageId, context.Topic);
-                }
+                    var success = await _brokerHost.PublishAsync(
+                        context.Topic,
+                        context.Payload,
+                        context.QoS,
+                        context.SourceClientId,
+                        context.Retain,
+                        linkedCts.Token);
 
-                return success;
+                    if (success)
+                    {
+                        _logger.LogDebug("消息 {MessageId} 注入 Topic {Topic} 成功",
+                            context.MessageId, context.Topic);
+                    }
+                    else
+                    {
+                        _logger.LogWarning("消息 {MessageId} 注入 Topic {Topic} 失败",
+                            context.MessageId, context.Topic);
+                    }
+
+                    return success;
+                }
+                finally
+                {
+                    MessageContext.CurrentMessageId.Value = null;
+                }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {

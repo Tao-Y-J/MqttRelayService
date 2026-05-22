@@ -83,17 +83,37 @@ Write-Host "[信息] 可执行文件: $exePath"
 
 # 读取配置获取端口号
 $tcpPort = 1883
+$metricsApiPort = 5000
+$dashboardPort = 5001
+$enableMetricsApi = $true
+$enableDashboard = $true
+
 if (Test-Path $configPath) {
     try {
         $config = Get-Content $configPath -Raw | ConvertFrom-Json
-        $tcpPort = $config.Mqtt.TcpPort
         Write-Host "[信息] 配置文件: $configPath"
+        if ($config.Mqtt -and $config.Mqtt.TcpPort -ne $null) {
+            $tcpPort = $config.Mqtt.TcpPort
+        }
+        if ($config.Web) {
+            if ($config.Web.MetricsApiPort -ne $null) { $metricsApiPort = $config.Web.MetricsApiPort }
+            if ($config.Web.DashboardPort -ne $null) { $dashboardPort = $config.Web.DashboardPort }
+            if ($config.Web.EnableMetricsApi -ne $null) { $enableMetricsApi = [bool]($config.Web.EnableMetricsApi) }
+            if ($config.Web.EnableDashboard -ne $null) { $enableDashboard = [bool]($config.Web.EnableDashboard) }
+        }
+        
         Write-Host "[信息] MQTT 端口: $tcpPort"
+        if ($enableMetricsApi) {
+            Write-Host "[信息] API  端口: $metricsApiPort"
+        }
+        if ($enableDashboard) {
+            Write-Host "[信息] 大屏 端口: $dashboardPort"
+        }
     } catch {
-        Write-Warning "读取配置文件失败，使用默认端口 1883"
+        Write-Warning "读取配置文件失败，使用默认端口配置"
     }
 } else {
-    Write-Warning "未找到配置文件，使用默认端口 1883"
+    Write-Warning "未找到配置文件，使用默认端口配置"
 }
 
 # 获取本机 IP 地址
@@ -106,13 +126,19 @@ try {
     Write-Warning "获取本机 IP 失败"
 }
 
-if ($ipList.Count -gt 0) {
-    Write-Host "[信息] 本机 IP 地址:"
-    foreach ($ip in $ipList) {
-        Write-Host "         - $ip`:$tcpPort"
+if ($ipList.Count -eq 0) {
+    $ipList = @("127.0.0.1")
+}
+
+Write-Host "[信息] 本机 IP 地址:"
+foreach ($ip in $ipList) {
+    Write-Host "         - MQTT 连线: $ip`:$tcpPort"
+    if ($enableMetricsApi) {
+        Write-Host "         - 指标 API: http://$ip`:$metricsApiPort/api/metrics"
     }
-} else {
-    Write-Host "[信息] 本机 IP 地址: 127.0.0.1:$tcpPort"
+    if ($enableDashboard) {
+        Write-Host "         - 监控后台: http://$ip`:$dashboardPort/"
+    }
 }
 
 Write-Host ""
@@ -174,6 +200,38 @@ try {
     exit 1
 }
 
+# 配置防火墙入站规则以发布三个端口
+try {
+    Write-Host "[步骤] 正在配置 Windows 防火墙入站规则以发布服务端口..."
+    
+    $firewallRules = @(
+        @{ Name = "${serviceName}-MQTT"; DisplayName = "${displayName} - MQTT Port"; Port = $tcpPort; Enabled = $true },
+        @{ Name = "${serviceName}-API"; DisplayName = "${displayName} - API Port"; Port = $metricsApiPort; Enabled = $enableMetricsApi },
+        @{ Name = "${serviceName}-Dashboard"; DisplayName = "${displayName} - Dashboard Port"; Port = $dashboardPort; Enabled = $enableDashboard }
+    )
+
+    foreach ($rule in $firewallRules) {
+        if ($rule.Enabled -eq $true) {
+            # 先删除已有规则，防止重复创建或端口改变
+            Remove-NetFirewallRule -Name $rule.Name -ErrorAction SilentlyContinue | Out-Null
+            
+            # 创建新规则
+            New-NetFirewallRule -Name $rule.Name `
+                -DisplayName $rule.DisplayName `
+                -Description "允许外部访问 ${displayName} 的服务端口 (由安装脚本自动配置)" `
+                -Direction Inbound `
+                -Action Allow `
+                -Protocol TCP `
+                -LocalPort $rule.Port `
+                -ErrorAction Stop | Out-Null
+            Write-Host "         - 成功发布端口 $($rule.Port) ($($rule.DisplayName))"
+        }
+    }
+    Write-Host "[成功] 防火墙入站端口发布完成。" -ForegroundColor Green
+} catch {
+    Write-Warning "配置防火墙端口规则失败 (可能是非 Server 系统或未开启高级安全 Windows Defender 防火墙服务): $_"
+}
+
 Write-Host ""
 Write-Host "============================================================"
 Write-Host " 安装结果" -ForegroundColor Cyan
@@ -183,10 +241,20 @@ Write-Host " 显示名称 : $displayName"
 Write-Host " 启动类型 : Automatic"
 Write-Host " 当前状态 : $($service.Status)"
 Write-Host " MQTT 端口: $tcpPort"
-if ($ipList.Count -gt 0) {
-    Write-Host " 访问地址 :"
-    foreach ($ip in $ipList) {
-        Write-Host "            - $ip`:$tcpPort"
+if ($enableMetricsApi) {
+    Write-Host " API  端口: $metricsApiPort"
+}
+if ($enableDashboard) {
+    Write-Host " 大屏 端口: $dashboardPort"
+}
+Write-Host " 访问地址 :"
+foreach ($ip in $ipList) {
+    Write-Host "            - MQTT 连线: $ip`:$tcpPort"
+    if ($enableMetricsApi) {
+        Write-Host "            - 指标 API: http://$ip`:$metricsApiPort/api/metrics"
+    }
+    if ($enableDashboard) {
+        Write-Host "            - 监控后台: http://$ip`:$dashboardPort/"
     }
 }
 Write-Host "============================================================"

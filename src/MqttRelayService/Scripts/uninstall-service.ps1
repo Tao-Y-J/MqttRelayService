@@ -147,6 +147,22 @@ foreach ($service in $services) {
         }
 
         Write-Host "[成功] 服务 '$($service.Name)' 已删除。" -ForegroundColor Green
+        
+        # 清理该服务对应的防火墙端口发布规则
+        try {
+            Write-Host "[步骤] 正在清理 Windows 防火墙入站规则..."
+            $ruleNames = @(
+                "$($service.Name)-MQTT",
+                "$($service.Name)-API",
+                "$($service.Name)-Dashboard"
+            )
+            foreach ($ruleName in $ruleNames) {
+                Remove-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue | Out-Null
+            }
+            Write-Host "         - 防火墙入站端口发布规则清理完成。" -ForegroundColor Green
+        } catch {
+            Write-Warning "清理防火墙规则失败: $_"
+        }
     } catch {
         Write-Host "[错误] 删除服务 '$($service.Name)' 失败: $_" -ForegroundColor Red
         exit 1

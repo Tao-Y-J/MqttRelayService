@@ -239,7 +239,7 @@ namespace MqttRelayService.Services.Implementations
                 // 更新客户端活动时间
                 await _clientRegistry.UpdateActivityAsync(e.ClientId);
 
-                var context = new RouteContext
+                var context = new MqttRelayService.Models.RouteContext
                 {
                     MessageId = Guid.NewGuid().ToString("N"),
                     Topic = e.ApplicationMessage.Topic,

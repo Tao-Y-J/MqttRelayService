@@ -27,7 +27,7 @@ namespace MqttRelayService.Services.Implementations
         /// <summary>
         /// 执行消息路由
         /// </summary>
-        public async Task<IReadOnlyList<ForwardResult>> RouteAsync(RouteContext context, CancellationToken cancellationToken = default)
+        public async Task<IReadOnlyList<ForwardResult>> RouteAsync(MqttRelayService.Models.RouteContext context, CancellationToken cancellationToken = default)
         {
             var results = new List<ForwardResult>();
 

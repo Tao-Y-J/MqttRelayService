@@ -10,6 +10,6 @@ namespace MqttRelayService.Services.Abstractions
         /// <summary>
         /// 执行消息路由
         /// </summary>
-        Task<IReadOnlyList<ForwardResult>> RouteAsync(RouteContext context, CancellationToken cancellationToken = default);
+        Task<IReadOnlyList<ForwardResult>> RouteAsync(MqttRelayService.Models.RouteContext context, CancellationToken cancellationToken = default);
     }
 }
