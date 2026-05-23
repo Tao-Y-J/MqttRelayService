@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -779,7 +779,7 @@ namespace MqttRelayService.Tests
             var cancelledToken = new CancellationToken(canceled: true);
 
             await Assert.ThrowsAsync<OperationCanceledException>(async () =>
-                await (Task<bool>)method!.Invoke(_service, new object[] { CreateTestMessage().RouteContext, cancelledToken })!);
+                await (Task<bool>)method!.Invoke(_service, new object[] { CreateTestMessage(), true, cancelledToken })!);
         }
 
         [Fact]

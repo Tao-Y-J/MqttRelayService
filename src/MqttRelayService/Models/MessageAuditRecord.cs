@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using SqlSugar;
 
 namespace MqttRelayService.Models
@@ -50,6 +50,11 @@ namespace MqttRelayService.Models
         /// 当前处理状态。
         /// </summary>
         public string Status { get; set; } = string.Empty;
+
+        /// <summary>
+        /// 是否命中订阅者。
+        /// </summary>
+        public bool IsSubscriberHit { get; set; }
 
         /// <summary>
         /// 处理耗时（毫秒）。

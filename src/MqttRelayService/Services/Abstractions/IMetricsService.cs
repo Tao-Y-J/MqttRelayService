@@ -26,7 +26,8 @@ namespace MqttRelayService.Services.Abstractions
         /// <param name="success">是否转发成功</param>
         /// <param name="retryCount">当前重试次数</param>
         /// <param name="latencyMs">转发耗时（毫秒）</param>
-        void RecordForwarded(MqttRelayService.Models.RouteContext context, bool success, int retryCount, double latencyMs);
+        /// <param name="isSubscriberHit">是否命中订阅者</param>
+        void RecordForwarded(MqttRelayService.Models.RouteContext context, bool success, int retryCount, double latencyMs, bool isSubscriberHit = false);
 
         /// <summary>
         /// 记录一条消息进入死信队列事件

@@ -249,7 +249,7 @@ namespace MqttRelayService.Services.Implementations
                     QoS = (int)e.ApplicationMessage.QualityOfServiceLevel,
                     Retain = e.ApplicationMessage.Retain,
                     SourceClientId = e.ClientId,
-                    Timestamp = DateTime.Now
+                    Timestamp = DateTime.UtcNow.ToLocalTime()
                 };
 
                 var forwardMessage = new ForwardMessage

@@ -366,16 +366,10 @@ namespace MqttRelayService.Services.Implementations
                 message.Status = MessageProcessStatus.Routing;
                 var targets = await _router.RouteAsync(context, cancellationToken);
 
-                if (targets.Count == 0 && !context.Retain)
-                {
-                    _logger.LogWarning("消息 {MessageId} 没有找到匹配的目标客户端", context.MessageId);
-                    message.Status = MessageProcessStatus.Succeeded; // 没有目标也算成功
-                    return;
-                }
-
-                // 转发阶段：向 Topic 单次注入，由 Broker 分发给所有匹配订阅者
+                // 转发阶段：向 Topic 单次注入，由 Broker 分发给所有匹配订阅者。
+                // 无论是否匹配到目标订阅者，均统一调用 TryForwardAsync 进行 Broker 注入，以确保完整的指标审计与延迟记录。
                 message.Status = MessageProcessStatus.Forwarding;
-                var success = await TryForwardAsync(context, cancellationToken);
+                var success = await TryForwardAsync(message, targets.Count > 0, cancellationToken);
 
                 if (success)
                 {
@@ -410,9 +404,10 @@ namespace MqttRelayService.Services.Implementations
         /// <summary>
         /// 尝试向 Topic 注入消息（由 Broker 分发给匹配订阅者）
         /// </summary>
-        private async Task<bool> TryForwardAsync(MqttRelayService.Models.RouteContext context, CancellationToken cancellationToken)
+        private async Task<bool> TryForwardAsync(ForwardMessage message, bool isSubscriberHit, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var context = message.RouteContext;
 
             try
             {
@@ -420,6 +415,9 @@ namespace MqttRelayService.Services.Implementations
                 using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
 
                 MessageContext.CurrentMessageId.Value = context.MessageId;
+                MessageContext.CurrentFirstReceivedAt.Value = context.Timestamp;
+                MessageContext.CurrentRetryCount.Value = message.RetryCount;
+                MessageContext.CurrentIsSubscriberHit.Value = isSubscriberHit;
                 Console.WriteLine($"[DEBUG-MSG] MessageDeliveryService.TryForwardAsync: Set CurrentMessageId.Value = '{MessageContext.CurrentMessageId.Value}' for context.MessageId = '{context.MessageId}'");
 
                 try
@@ -448,6 +446,9 @@ namespace MqttRelayService.Services.Implementations
                 finally
                 {
                     MessageContext.CurrentMessageId.Value = null;
+                    MessageContext.CurrentFirstReceivedAt.Value = null;
+                    MessageContext.CurrentRetryCount.Value = null;
+                    MessageContext.CurrentIsSubscriberHit.Value = null;
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

@@ -126,6 +126,7 @@ namespace MqttRelayService.Services.Implementations
                 Qos = message.RouteContext.QoS,
                 Retain = message.RouteContext.Retain,
                 Status = "Queued",
+                IsSubscriberHit = false,
                 LatencyMs = 0.0,
                 RetryCount = message.RetryCount,
                 Timestamp = DateTime.Now.ToString("o"),
@@ -143,6 +144,7 @@ namespace MqttRelayService.Services.Implementations
                 Qos = message.RouteContext.QoS,
                 Retain = message.RouteContext.Retain,
                 Status = "Queued",
+                IsSubscriberHit = false,
                 LatencyMs = 0.0,
                 RetryCount = message.RetryCount,
                 CreatedAt = message.RouteContext.Timestamp,
@@ -161,7 +163,7 @@ namespace MqttRelayService.Services.Implementations
         /// <summary>
         /// 记录消息转发结果
         /// </summary>
-        public void RecordForwarded(MqttRelayService.Models.RouteContext context, bool success, int retryCount, double latencyMs)
+        public void RecordForwarded(MqttRelayService.Models.RouteContext context, bool success, int retryCount, double latencyMs, bool isSubscriberHit = false)
         {
             if (success)
             {
@@ -188,6 +190,7 @@ namespace MqttRelayService.Services.Implementations
                 Qos = context.QoS,
                 Retain = context.Retain,
                 Status = success ? "Succeeded" : "Failed",
+                IsSubscriberHit = isSubscriberHit,
                 LatencyMs = Math.Round(latencyMs, 2),
                 RetryCount = retryCount,
                 Timestamp = DateTime.Now.ToString("o"),
@@ -205,6 +208,7 @@ namespace MqttRelayService.Services.Implementations
                 Qos = context.QoS,
                 Retain = context.Retain,
                 Status = success ? "Succeeded" : "Failed",
+                IsSubscriberHit = isSubscriberHit,
                 LatencyMs = Math.Round(latencyMs, 2),
                 RetryCount = retryCount,
                 CreatedAt = context.Timestamp,
@@ -242,6 +246,7 @@ namespace MqttRelayService.Services.Implementations
                 Qos = 0,
                 Retain = false,
                 Status = "DeadLetter",
+                IsSubscriberHit = false,
                 LatencyMs = Math.Round((record.LastFailedAt - record.FirstReceivedAt).TotalMilliseconds, 2),
                 RetryCount = record.RetryCount,
                 Timestamp = DateTime.Now.ToString("o"),
@@ -259,6 +264,7 @@ namespace MqttRelayService.Services.Implementations
                 Qos = 0,
                 Retain = false,
                 Status = "DeadLetter",
+                IsSubscriberHit = false,
                 LatencyMs = Math.Round((record.LastFailedAt - record.FirstReceivedAt).TotalMilliseconds, 2),
                 RetryCount = record.RetryCount,
                 CreatedAt = record.FirstReceivedAt,
@@ -309,6 +315,9 @@ namespace MqttRelayService.Services.Implementations
                 return;
             }
 
+            const int batchSize = 100;
+            var batch = new List<MessageAuditRecord>(batchSize);
+
             while (!_pendingMessageAudits.IsEmpty)
             {
                 var snapshot = _pendingMessageAudits.ToArray();
@@ -324,15 +333,37 @@ namespace MqttRelayService.Services.Implementations
                         continue;
                     }
 
+                    batch.Add(latestRecord);
+
+                    if (batch.Count >= batchSize)
+                    {
+                        try
+                        {
+                            await _auditRepository.RecordMessageAuditsAsync(batch);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "后台批量写入 {Count} 条消息审计记录时发生异常", batch.Count);
+                        }
+                        batch.Clear();
+                    }
+                }
+
+                if (batch.Count > 0)
+                {
                     try
                     {
-                        await _auditRepository.RecordMessageAuditAsync(latestRecord);
+                        await _auditRepository.RecordMessageAuditsAsync(batch);
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(ex, "后台写入消息 {MessageId} 审计记录时发生异常", latestRecord.MessageId);
+                        _logger.LogError(ex, "后台批量写入 {Count} 条消息审计记录时发生异常", batch.Count);
                     }
+                    batch.Clear();
                 }
+
+                // 每次刷完一轮后，进行短暂的 Yield 释放 CPU 占用，防止高吞吐下完全堵死其他线程的数据库查询
+                await Task.Yield();
             }
         }
 
@@ -404,6 +435,7 @@ namespace MqttRelayService.Services.Implementations
                 (id, existing) =>
                 {
                     existing.Status = entry.Status;
+                    existing.IsSubscriberHit = entry.IsSubscriberHit;
                     existing.LatencyMs = entry.LatencyMs;
                     existing.RetryCount = entry.RetryCount;
                     existing.Timestamp = entry.Timestamp;
@@ -524,7 +556,7 @@ namespace MqttRelayService.Services.Implementations
                     ServiceName = _serviceOptions.Name,
                     MqttPort = _mqttOptions.TcpPort,
                     Uptime = uptimeString,
-                    OsVersion = RuntimeInformation.OSDescription,
+                    OsVersion = GetFriendlyOsDescription(),
                     DotNetVersion = RuntimeInformation.FrameworkDescription,
                     CpuThreads = Environment.ProcessorCount,
                     MemoryUsageMb = Math.Round(process.WorkingSet64 / 1024.0 / 1024.0, 2),
@@ -563,6 +595,35 @@ namespace MqttRelayService.Services.Implementations
                     DeadLetterPath = _reliabilityOptions.DeadLetterPath
                 }
             };
+        }
+
+        /// <summary>
+        /// 获取人性化的操作系统描述。对于 Windows 11，由于其内核大版本号依然是 10.0，
+        /// 需要根据 Build 号（>= 22000 为 Win11）进行适配转换。
+        /// </summary>
+        private static string GetFriendlyOsDescription()
+        {
+            var desc = RuntimeInformation.OSDescription;
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                try
+                {
+                    var version = Environment.OSVersion.Version;
+                    if (version.Major == 10 && version.Minor == 0)
+                    {
+                        if (version.Build >= 22000)
+                        {
+                            return desc.Replace("Windows 10.0", "Windows 11")
+                                       .Replace("Windows 10", "Windows 11");
+                        }
+                    }
+                }
+                catch
+                {
+                    // 容错降级，如遇异常直接返回默认描述
+                }
+            }
+            return desc;
         }
 
         public void Dispose()
@@ -626,6 +687,11 @@ namespace MqttRelayService.Services.Implementations
         /// 当前处理状态 (Queued, Succeeded, Failed, DeadLetter)
         /// </summary>
         public string Status { get; set; } = string.Empty;
+
+        /// <summary>
+        /// 是否命中订阅者
+        /// </summary>
+        public bool IsSubscriberHit { get; set; }
 
         /// <summary>
         /// 处理耗时（毫秒）

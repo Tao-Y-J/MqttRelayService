@@ -26,6 +26,7 @@ namespace MqttRelayService.Services.Implementations
 
         private long _messageInsertCounter;
         private long _clientInsertCounter;
+        private bool _schemaEnsured;
 
         public AuditRepository(IOptions<AuditStorageOptions> options, ILogger<AuditRepository> logger)
             : this(options.Value, logger)
@@ -100,7 +101,7 @@ namespace MqttRelayService.Services.Implementations
 
         private async Task EnsureSchemaAsync()
         {
-            if (!_options.AutoInitializeSchema)
+            if (!_options.AutoInitializeSchema || _schemaEnsured)
             {
                 return;
             }
@@ -115,6 +116,7 @@ namespace MqttRelayService.Services.Implementations
             }
 
             _db.CodeFirst.InitTables<MessageAuditRecord, ClientConnectionHistoryRecord>();
+            _schemaEnsured = true;
             await Task.CompletedTask;
         }
 
@@ -179,6 +181,50 @@ namespace MqttRelayService.Services.Implementations
             catch (Exception ex)
             {
                 _logger.LogError(ex, "写入消息 {MessageId} 审计记录发生异常", record.MessageId);
+            }
+            finally
+            {
+                _writeLock.Release();
+            }
+        }
+
+        public async Task RecordMessageAuditsAsync(IReadOnlyList<MessageAuditRecord> records)
+        {
+            if (records == null || records.Count == 0) return;
+
+            await _writeLock.WaitAsync();
+            try
+            {
+                await EnsureSchemaAsync();
+
+                // 使用事务进行高性能批量写入
+                await _db.UseTranAsync(async () =>
+                {
+                    foreach (var record in records)
+                    {
+                        var exists = await _db.Queryable<MessageAuditRecord>().AnyAsync(x => x.MessageId == record.MessageId);
+                        if (exists)
+                        {
+                            await _db.Updateable(record)
+                                .IgnoreColumns(x => new { x.CreatedAt })
+                                .ExecuteCommandAsync();
+                        }
+                        else
+                        {
+                            await _db.Insertable(record).ExecuteCommandAsync();
+                        }
+                    }
+                });
+
+                var val = Interlocked.Add(ref _messageInsertCounter, records.Count);
+                if (val / 100 > (val - records.Count) / 100)
+                {
+                    _ = Task.Run(() => CleanupHistoryAsync(_options.MessageRetentionCount, _options.ClientHistoryRetentionCount));
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "批量写入 {Count} 条消息审计记录发生异常", records.Count);
             }
             finally
             {

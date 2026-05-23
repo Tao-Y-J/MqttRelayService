@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -898,12 +898,13 @@
                     <table class="fixed-table">
                         <colgroup>
                             <col style="width: 12%">
+                            <col style="width: 15%">
+                            <col style="width: 12%">
+                            <col style="width: 19%">
                             <col style="width: 16%">
-                            <col style="width: 13%">
-                            <col style="width: 21%">
-                            <col style="width: 18%">
-                            <col style="width: 10%">
-                            <col style="width: 10%">
+                            <col style="width: 9%">
+                            <col style="width: 9%">
+                            <col style="width: 8%">
                         </colgroup>
                         <thead>
                             <tr>
@@ -913,12 +914,13 @@
                                 <th>主题</th>
                                 <th>属性 (QoS/Retain)</th>
                                 <th>状态</th>
+                                <th>命中</th>
                                 <th style="text-align: center;">操作</th>
                             </tr>
                         </thead>
                         <tbody id="dashboard-recent-messages">
                             <tr>
-                                <td colspan="7" class="empty-state">
+                                <td colspan="8" class="empty-state">
                                     <i class="fa-solid fa-spinner fa-spin"></i>
                                     <span>等待获取数据快照中...</span>
                                 </td>
@@ -1076,13 +1078,14 @@
                         <table class="fixed-table">
                             <colgroup>
                                 <col style="width: 14%">
-                                <col style="width: 18%">
-                                <col style="width: 14%">
-                                <col style="width: 18%">
-                                <col style="width: 9%">
-                                <col style="width: 9%">
-                                <col style="width: 10%">
+                                <col style="width: 17%">
+                                <col style="width: 13%">
+                                <col style="width: 17%">
                                 <col style="width: 8%">
+                                <col style="width: 8%">
+                                <col style="width: 8%">
+                                <col style="width: 8%">
+                                <col style="width: 7%">
                             </colgroup>
                             <thead>
                                 <tr>
@@ -1093,6 +1096,7 @@
                                     <th>延迟</th>
                                     <th>重试次数</th>
                                     <th>状态</th>
+                                    <th>命中</th>
                                     <th style="text-align: center;">操作</th>
                                 </tr>
                             </thead>
@@ -1316,6 +1320,7 @@
                 <span class="info-label">处理结果与审计</span>
                 <div class="info-value-block">
                     执行状态: <span id="drawer-msg-status">-</span><br>
+                    是否命中: <span id="drawer-msg-hit" class="code-bold">-</span><br>
                     注入耗时: <span class="code-bold" id="drawer-msg-latency">-</span><br>
                     重试次数: <span class="code-bold" id="drawer-msg-retries">-</span><br>
                     记录时间: <span id="drawer-msg-time">-</span>
@@ -1644,7 +1649,7 @@
             const recentLogs = rawMetrics.logs.slice(0, 8);
             const recentTbody = document.getElementById('dashboard-recent-messages');
             if (recentLogs.length === 0) {
-                recentTbody.innerHTML = `<tr><td colspan="7" class="empty-state"><i class="fa-solid fa-envelope-open"></i><span>当前无在途或已完成的消息流</span></td></tr>`;
+                recentTbody.innerHTML = `<tr><td colspan="8" class="empty-state"><i class="fa-solid fa-envelope-open"></i><span>当前无在途或已完成的消息流</span></td></tr>`;
             } else {
                 recentTbody.innerHTML = recentLogs.map(log => `
                     <tr class="tr-clickable" onclick="openMessageDetail('${log.messageId}')">
@@ -1654,6 +1659,7 @@
                         <td class="code-text" style="color: var(--color-cyan)">${log.topic}</td>
                         <td class="code-text">QoS ${log.qos} ${log.retain ? '| Retain' : ''}</td>
                         <td><span class="badge badge-${log.status.toLowerCase()}">${getStatusChinese(log.status)}</span></td>
+                        <td>${getHitBadge(log)}</td>
                         <td style="text-align: center;">
                             <button class="btn-action" onclick="openMessageDetail('${log.messageId}'); event.stopPropagation();">
                                 <i class="fa-solid fa-eye"></i> 查看
@@ -1683,9 +1689,49 @@
             document.getElementById('config-dlq-path').textContent = rawMetrics.configuration.deadLetterPath;
         }
 
+        // ==================== 分页辅助重置函数 ====================
+        function resetClientsPagination() {
+            document.getElementById('clients-page-num').textContent = '1';
+            document.getElementById('clients-total-pages').textContent = '1';
+            document.getElementById('clients-total-records').textContent = '0';
+            document.getElementById('clients-btn-prev').disabled = true;
+            document.getElementById('clients-btn-next').disabled = true;
+        }
+
+        function resetHistoryPagination() {
+            document.getElementById('history-page-num').textContent = '1';
+            document.getElementById('history-total-pages').textContent = '1';
+            document.getElementById('history-total-records').textContent = '0';
+            document.getElementById('history-btn-prev').disabled = true;
+            document.getElementById('history-btn-next').disabled = true;
+        }
+
+        function resetMessagesPagination() {
+            document.getElementById('messages-page-num').textContent = '1';
+            document.getElementById('messages-total-pages').textContent = '1';
+            document.getElementById('messages-total-records').textContent = '0';
+            document.getElementById('messages-btn-prev').disabled = true;
+            document.getElementById('messages-btn-next').disabled = true;
+        }
+
+        function resetDlqPagination() {
+            document.getElementById('dlq-page-num').textContent = '1';
+            document.getElementById('dlq-total-pages').textContent = '1';
+            document.getElementById('dlq-total-records').textContent = '0';
+            document.getElementById('dlq-btn-prev').disabled = true;
+            document.getElementById('dlq-btn-next').disabled = true;
+        }
+
         // ==================== 在线客户端本地分页 ====================
         function renderOnlineClientsTable() {
-            if (!rawMetrics) return;
+            if (!rawMetrics || !rawMetrics.clients || !Array.isArray(rawMetrics.clients.list)) {
+                resetClientsPagination();
+                const tbody = document.getElementById('clients-table-body');
+                if (tbody) {
+                    tbody.innerHTML = `<tr><td colspan="6" class="empty-state"><i class="fa-solid fa-users-slash"></i><span>当前没有任何在线 MQTT 客户端</span></td></tr>`;
+                }
+                return;
+            }
             const query = document.getElementById('client-search').value.toLowerCase().trim();
 
             let list = rawMetrics.clients.list;
@@ -1775,14 +1821,19 @@
                     renderHistoryUI(data.total || data.totalCount, data.items);
                 } else {
                     tbody.innerHTML = `<tr><td colspan="6" class="empty-state" style="color: var(--color-danger);"><i class="fa-solid fa-triangle-exclamation"></i><span>网络数据拉取失败，请检查主服务连接。</span></td></tr>`;
+                    resetHistoryPagination();
                 }
             } catch (err) {
                 console.error('拉取连接历史失败:', err);
                 tbody.innerHTML = `<tr><td colspan="6" class="empty-state" style="color: var(--color-danger);"><i class="fa-solid fa-triangle-exclamation"></i><span>网络数据拉取失败，请检查主服务连接。</span></td></tr>`;
+                resetHistoryPagination();
             }
         }
 
         function renderHistoryUI(totalCount, items) {
+            totalCount = typeof totalCount === 'number' && !isNaN(totalCount) ? totalCount : 0;
+            items = Array.isArray(items) ? items : [];
+
             const totalPages = Math.max(1, Math.ceil(totalCount / historyPageSize));
             
             document.getElementById('history-page-num').textContent = historyPage;
@@ -1880,15 +1931,20 @@
                     const data = await response.json();
                     renderMessagesUI(data.total || data.totalCount, data.items);
                 } else {
-                    tbody.innerHTML = `<tr><td colspan="8" class="empty-state" style="color: var(--color-danger);"><i class="fa-solid fa-triangle-exclamation"></i><span>网络数据拉取失败，请检查主服务连接。</span></td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="9" class="empty-state" style="color: var(--color-danger);"><i class="fa-solid fa-triangle-exclamation"></i><span>网络数据拉取失败，请检查主服务连接。</span></td></tr>`;
+                    resetMessagesPagination();
                 }
             } catch (err) {
                 console.error('拉取消息审计日志失败:', err);
-                tbody.innerHTML = `<tr><td colspan="8" class="empty-state" style="color: var(--color-danger);"><i class="fa-solid fa-triangle-exclamation"></i><span>网络数据拉取失败，请检查主服务连接。</span></td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="9" class="empty-state" style="color: var(--color-danger);"><i class="fa-solid fa-triangle-exclamation"></i><span>网络数据拉取失败，请检查主服务连接。</span></td></tr>`;
+                resetMessagesPagination();
             }
         }
 
         function renderMessagesUI(totalCount, items) {
+            totalCount = typeof totalCount === 'number' && !isNaN(totalCount) ? totalCount : 0;
+            items = Array.isArray(items) ? items : [];
+
             const totalPages = Math.max(1, Math.ceil(totalCount / messagesPageSize));
             
             document.getElementById('messages-page-num').textContent = messagesPage;
@@ -1900,7 +1956,7 @@
 
             const tbody = document.getElementById('messages-table-body');
             if (items.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="8" class="empty-state"><i class="fa-solid fa-inbox"></i><span>尚无符合条件的消息审计记录</span></td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="9" class="empty-state"><i class="fa-solid fa-inbox"></i><span>尚无符合条件的消息审计记录</span></td></tr>`;
                 return;
             }
 
@@ -1910,9 +1966,10 @@
                     <td class="code-text">${log.messageId}</td>
                     <td class="code-bold">${log.sourceClientId}</td>
                     <td class="code-text" style="color: var(--color-cyan)">${log.topic}</td>
-                    <td class="code-text">${log.latencyMs ? log.latencyMs.toFixed(1) : '0'} ms</td>
+                    <td class="code-text">${formatLatency(log.latencyMs)}</td>
                     <td class="code-text">${log.retryCount} 次</td>
                     <td><span class="badge badge-${log.status.toLowerCase()}">${getStatusChinese(log.status)}</span></td>
+                    <td>${getHitBadge(log)}</td>
                     <td style="text-align: center;">
                         <button class="btn-action" onclick="openMessageDetail('${log.messageId}'); event.stopPropagation();">
                             <i class="fa-solid fa-eye"></i> 查看
@@ -1977,14 +2034,19 @@
                     renderDlqUI(data.total || data.totalCount, data.items);
                 } else {
                     tbody.innerHTML = `<tr><td colspan="7" class="empty-state" style="color: var(--color-danger);"><i class="fa-solid fa-triangle-exclamation"></i><span>网络数据拉取失败，请检查主服务连接。</span></td></tr>`;
+                    resetDlqPagination();
                 }
             } catch (err) {
                 console.error('拉取死信审计失败:', err);
                 tbody.innerHTML = `<tr><td colspan="7" class="empty-state" style="color: var(--color-danger);"><i class="fa-solid fa-triangle-exclamation"></i><span>网络数据拉取失败，请检查主服务连接。</span></td></tr>`;
+                resetDlqPagination();
             }
         }
 
         function renderDlqUI(totalCount, items) {
+            totalCount = typeof totalCount === 'number' && !isNaN(totalCount) ? totalCount : 0;
+            items = Array.isArray(items) ? items : [];
+
             const totalPages = Math.max(1, Math.ceil(totalCount / dlqPageSize));
             
             document.getElementById('dlq-page-num').textContent = dlqPage;
@@ -2065,6 +2127,8 @@
                 document.getElementById('drawer-msg-qos').textContent = "-";
                 document.getElementById('drawer-msg-retain').textContent = "-";
                 document.getElementById('drawer-msg-status').textContent = "加载中...";
+                document.getElementById('drawer-msg-hit').textContent = "-";
+                document.getElementById('drawer-msg-hit').className = "code-bold";
                 document.getElementById('drawer-msg-latency').textContent = "-";
                 document.getElementById('drawer-msg-retries').textContent = "-";
                 document.getElementById('drawer-msg-time').textContent = "-";
@@ -2099,7 +2163,19 @@
             statusBox.className = `badge badge-${log.status.toLowerCase()}`;
             statusBox.textContent = getStatusChinese(log.status);
 
-            document.getElementById('drawer-msg-latency').textContent = (log.latencyMs ? log.latencyMs.toFixed(1) : '0') + " ms";
+            const hitBox = document.getElementById('drawer-msg-hit');
+            if (log.status === 'Queued' || log.status === 'Routing' || log.status === 'Forwarding') {
+                hitBox.textContent = "-";
+                hitBox.style.color = "var(--text-muted)";
+            } else if (log.isSubscriberHit) {
+                hitBox.textContent = "命中";
+                hitBox.style.color = "var(--color-success)";
+            } else {
+                hitBox.textContent = "未命中";
+                hitBox.style.color = "var(--color-danger)";
+            }
+
+            document.getElementById('drawer-msg-latency').textContent = formatLatency(log.latencyMs);
             document.getElementById('drawer-msg-retries').textContent = log.retryCount + " 次";
             document.getElementById('drawer-msg-time').textContent = new Date(log.createdAt || log.timestamp).toLocaleString();
 
@@ -2169,6 +2245,14 @@
         }
 
         // ==================== 辅助格式化函数 ====================
+        function formatLatency(ms) {
+            if (ms === undefined || ms === null) return '-';
+            if (ms === 0) return '0 ms';
+            if (ms < 0.1) return ms.toFixed(3) + ' ms';
+            if (ms < 1.0) return ms.toFixed(2) + ' ms';
+            return ms.toFixed(1) + ' ms';
+        }
+
         function formatTime(isoString) {
             if (!isoString) return '-';
             const date = new Date(isoString);
@@ -2185,6 +2269,15 @@
                 case 'DeadLetter': return '死信隔离';
                 default: return status;
             }
+        }
+
+        function getHitBadge(log) {
+            if (log.status === 'Queued' || log.status === 'Routing' || log.status === 'Forwarding') {
+                return `<span class="badge badge-queued">-</span>`;
+            }
+            return log.isSubscriberHit 
+                ? `<span class="badge badge-succeeded"><i class="fa-solid fa-circle-check"></i> 命中</span>` 
+                : `<span class="badge badge-deadletter"><i class="fa-solid fa-circle-xmark"></i> 未命中</span>`;
         }
 
         // ==================== 应用初始化 ====================

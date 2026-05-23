@@ -313,6 +313,21 @@ namespace MqttRelayService.Tests
                     return Task.CompletedTask;
                 });
 
+            _mockAuditRepository
+                .Setup(r => r.RecordMessageAuditsAsync(It.IsAny<IReadOnlyList<MessageAuditRecord>>()))
+                .Returns<IReadOnlyList<MessageAuditRecord>>(records =>
+                {
+                    foreach (var record in records)
+                    {
+                        if (record.MessageId == "async_msg_1" && record.Status == "Succeeded")
+                        {
+                            persistedSucceeded.TrySetResult(record);
+                        }
+                    }
+
+                    return Task.CompletedTask;
+                });
+
             using var metricsService = new MetricsService(
                 _queue,
                 _mockClientRegistry.Object,
@@ -396,7 +411,8 @@ namespace MqttRelayService.Tests
                 It.Is<RouteContext>(ctx => ctx.Topic == "topic" && ctx.SourceClientId == "client_x" && ctx.Retain),
                 true,
                 0,
-                It.IsAny<double>()
+                It.IsAny<double>(),
+                It.IsAny<bool>()
             ), Times.Once);
         }
 
@@ -428,7 +444,8 @@ namespace MqttRelayService.Tests
                     It.Is<RouteContext>(ctx => ctx.MessageId == originalMessageId && ctx.Topic == "topic_abc" && ctx.SourceClientId == "client_abc"),
                     true,
                     0,
-                    It.IsAny<double>()
+                    It.IsAny<double>(),
+                    It.IsAny<bool>()
                 ), Times.Once);
             }
             finally

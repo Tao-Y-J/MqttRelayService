@@ -44,8 +44,11 @@ namespace MqttRelayService.Services.Implementations.Decorators
             bool retain = false,
             CancellationToken cancellationToken = default)
         {
-            // 在 await 发生之前，立即读取当前上下文的消息 ID，防止因 await 后线程切换/上下文丢失导致值为空
+            // 在 await 发生之前，立即读取当前上下文的消息 ID、首次接收时间、已重试次数与是否命中订阅者，防止因 await 后线程切换导致丢失
             var currentId = MessageContext.CurrentMessageId.Value;
+            var firstReceivedAt = MessageContext.CurrentFirstReceivedAt.Value;
+            var retryCount = MessageContext.CurrentRetryCount.Value ?? 0;
+            var isSubscriberHit = MessageContext.CurrentIsSubscriberHit.Value ?? false;
 
             // 通过获取当前正在运行的堆栈与转发属性，度量单次注入的真实延迟
             var stopwatch = Stopwatch.StartNew();
@@ -60,7 +63,7 @@ namespace MqttRelayService.Services.Implementations.Decorators
             {
                 stopwatch.Stop();
 
-                Console.WriteLine($"[DEBUG-MSG] MetricsMqttBrokerHost.PublishAsync: CurrentMessageId = '{currentId}', Topic = '{topic}', SourceClientId = '{sourceClientId}'");
+                Console.WriteLine($"[DEBUG-MSG] MetricsMqttBrokerHost.PublishAsync: CurrentMessageId = '{currentId}', Topic = '{topic}', SourceClientId = '{sourceClientId}', FirstReceivedAt = '{firstReceivedAt}', RetryCount = {retryCount}, IsSubscriberHit = {isSubscriberHit}");
 
                 // 构建路由上下文传递给指标器，以便记录详细的审计日志
                 var context = new MqttRelayService.Models.RouteContext
@@ -71,11 +74,16 @@ namespace MqttRelayService.Services.Implementations.Decorators
                     QoS = qos,
                     Retain = retain,
                     SourceClientId = sourceClientId ?? string.Empty,
-                    Timestamp = DateTime.Now
+                    Timestamp = firstReceivedAt ?? DateTime.UtcNow.ToLocalTime()
                 };
 
+                // 度量延迟：若存在首次接收时间，则计算端到端总耗时；否则使用注入调用的物理耗时
+                double elapsedMs = firstReceivedAt.HasValue
+                    ? (DateTime.UtcNow.ToLocalTime() - firstReceivedAt.Value).TotalMilliseconds
+                    : stopwatch.Elapsed.TotalMilliseconds;
+
                 // 记录转发成功或失败的性能指标
-                _metrics.RecordForwarded(context, success, retryCount: 0, stopwatch.Elapsed.TotalMilliseconds);
+                _metrics.RecordForwarded(context, success, retryCount, elapsedMs, isSubscriberHit);
             }
         }
     }

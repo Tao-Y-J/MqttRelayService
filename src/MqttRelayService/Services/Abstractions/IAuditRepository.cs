@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using MqttRelayService.Models;
@@ -19,6 +19,11 @@ namespace MqttRelayService.Services.Abstractions
         /// 记录或更新一条消息审计状态。
         /// </summary>
         Task RecordMessageAuditAsync(MessageAuditRecord record);
+
+        /// <summary>
+        /// 批量记录或更新多条消息审计状态。
+        /// </summary>
+        Task RecordMessageAuditsAsync(IReadOnlyList<MessageAuditRecord> records);
 
         /// <summary>
         /// 记录一条客户端连接或订阅历史。
