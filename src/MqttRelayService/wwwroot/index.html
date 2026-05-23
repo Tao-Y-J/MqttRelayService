@@ -2018,12 +2018,12 @@
 
             tbody.innerHTML = items.map(h => `
                         <tr>
-                            <td class="code-text">${new Date(h.timestamp).toLocaleString()}</td>
-                            <td class="code-bold">${h.clientId}</td>
-                            <td class="code-text">${h.username || '<匿名连接>'}</td>
-                            <td class="code-text" style="color: var(--text-muted);">${h.connectionId.substring(0, 15)}...</td>
-                            <td><span class="badge ${getEventBadgeClass(h.event)}">${getEventChinese(h.event)}</span></td>
-                            <td class="code-text" style="color: var(--color-cyan);">${h.details || ''}</td>
+                            ${buildCell(new Date(h.timestamp).toLocaleString(), 'code-text cell-tight', new Date(h.timestamp).toLocaleString())}
+                            ${buildCell(escapeHtml(h.clientId || ''), 'code-bold cell-main', h.clientId)}
+                            ${buildCell(escapeHtml(h.username || '<匿名连接>'), 'code-text cell-tight', h.username || '<匿名连接>')}
+                            ${buildCell(escapeHtml(formatMiddleEllipsis(h.connectionId || '', 16, 10)), 'code-text cell-code-wide', h.connectionId)}
+                            ${buildCell(`<span class="badge ${getEventBadgeClass(h.event)}">${getEventChinese(h.event)}</span>`, 'cell-tight', getEventChinese(h.event))}
+                            ${buildCell(escapeHtml(h.details || ''), 'code-text cell-detail', h.details || '')}
                         </tr>
                     `).join('');
         }
@@ -2129,15 +2129,15 @@
 
             tbody.innerHTML = items.map(log => `
                         <tr class="tr-clickable" onclick="openMessageDetail('${log.messageId}')">
-                            <td class="code-text">${new Date(log.createdAt || log.timestamp).toLocaleString()}</td>
-                            <td class="code-text">${log.messageId}</td>
-                            <td class="code-bold">${log.sourceClientId}</td>
-                            <td class="code-text" style="color: var(--color-cyan)">${log.topic}</td>
-                            <td class="code-text">${formatLatency(log.latencyMs)}</td>
-                            <td class="code-text">${log.retryCount} 次</td>
-                            <td><span class="badge badge-${log.status.toLowerCase()}">${getStatusChinese(log.status)}</span></td>
-                            <td>${getHitBadge(log)}</td>
-                            <td style="text-align: center;">
+                            ${buildCell(new Date(log.createdAt || log.timestamp).toLocaleString(), 'code-text cell-tight', new Date(log.createdAt || log.timestamp).toLocaleString())}
+                            ${buildCell(escapeHtml(formatMiddleEllipsis(log.messageId, 18, 12)), 'code-text cell-code-wide', log.messageId)}
+                            ${buildCell(escapeHtml(log.sourceClientId || ''), 'code-bold cell-main', log.sourceClientId)}
+                            ${buildCell(escapeHtml(log.topic || ''), 'code-text cell-topic', log.topic)}
+                            ${buildCell(formatLatency(log.latencyMs), 'code-text cell-tight', formatLatency(log.latencyMs))}
+                            ${buildCell(`${log.retryCount} 次`, 'code-text cell-tight', `${log.retryCount} 次`)}
+                            ${buildCell(`<span class="badge badge-${log.status.toLowerCase()}">${getStatusChinese(log.status)}</span>`, 'cell-tight', getStatusChinese(log.status))}
+                            ${buildCell(getHitBadge(log), 'cell-tight', log.matchedSubscriberCount > 0 ? '命中' : '未命中')}
+                            <td class="cell-action">
                                 <button class="btn-action" onclick="openMessageDetail('${log.messageId}'); event.stopPropagation();">
                                     <i class="fa-solid fa-eye"></i> 查看
                                 </button>
