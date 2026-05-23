@@ -352,6 +352,74 @@ namespace MqttRelayService.Tests
         }
 
         [Fact]
+        public async Task MetricsMessageQueue_EnqueueAsync_FirstReceipt_ShouldRecordQueuedBeforeInnerEnqueueCompletes()
+        {
+            var persistedQueued = new TaskCompletionSource<MessageAuditRecord>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var enqueueGate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var mockMetrics = new Mock<IMetricsService>();
+            var mockQueue = new Mock<IMessageQueue>();
+
+            _mockAuditRepository
+                .Setup(r => r.RecordMessageAuditsAsync(It.IsAny<IReadOnlyList<MessageAuditRecord>>()))
+                .Callback<IReadOnlyList<MessageAuditRecord>>(records =>
+                {
+                    var record = records.SingleOrDefault(r => r.MessageId == "queued_before_enqueue" && r.Status == "Queued");
+                    if (record != null)
+                    {
+                        persistedQueued.TrySetResult(record);
+                    }
+                })
+                .Returns(Task.CompletedTask);
+
+            using var metricsService = new MetricsService(
+                _queue,
+                _mockClientRegistry.Object,
+                _serviceOptions,
+                _mqttOptions,
+                _reliabilityOptions,
+                _mockAuditRepository.Object,
+                _mockLogger.Object);
+
+            mockMetrics
+                .Setup(m => m.RecordReceived(It.IsAny<ForwardMessage>(), It.IsAny<bool>()))
+                .Callback<ForwardMessage, bool>((msg, first) => metricsService.RecordReceived(msg, first));
+
+            var decorator = new MetricsMessageQueue(mockQueue.Object, mockMetrics.Object);
+            var message = new ForwardMessage
+            {
+                MessageId = "queued_before_enqueue",
+                RouteContext = new RouteContext
+                {
+                    MessageId = "queued_before_enqueue",
+                    Topic = "race/topic",
+                    Payload = new byte[] { 1 },
+                    QoS = 0,
+                    Retain = false,
+                    SourceClientId = "race_client",
+                    Timestamp = DateTime.Now
+                },
+                Status = MessageProcessStatus.Received
+            };
+
+            mockQueue
+                .Setup(q => q.EnqueueAsync(message, It.IsAny<CancellationToken>()))
+                .Returns(async () =>
+                {
+                    await enqueueGate.Task;
+                    return true;
+                });
+
+            var enqueueTask = decorator.EnqueueAsync(message);
+
+            var completed = await Task.WhenAny(persistedQueued.Task, Task.Delay(TimeSpan.FromSeconds(2)));
+            Assert.Same(persistedQueued.Task, completed);
+            mockMetrics.Verify(m => m.RecordReceived(message, true), Times.Once);
+
+            enqueueGate.TrySetResult(true);
+            Assert.True(await enqueueTask);
+        }
+
+        [Fact]
         public async Task MetricsService_RecordReceived_AfterSucceeded_ShouldNotOverwriteTerminalAuditState()
         {
             var now = DateTime.Now;

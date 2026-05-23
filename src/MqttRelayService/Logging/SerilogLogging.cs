@@ -42,6 +42,8 @@ namespace MqttRelayService.Logging
                 .Enrich.WithProperty("ServiceName", serviceName)
                 .WriteTo.Console(outputTemplate: consoleTemplate);
 
+            ApplyMinimumLevelOverrides(loggerConfig, configuration);
+
             // 文件日志配置
             var logsPath = Path.Combine(AppContext.BaseDirectory, "Logs");
             loggerConfig.WriteTo.File(
@@ -57,6 +59,27 @@ namespace MqttRelayService.Logging
             }
 
             return loggerConfig.CreateLogger();
+        }
+
+        private static void ApplyMinimumLevelOverrides(
+            LoggerConfiguration loggerConfig,
+            Microsoft.Extensions.Configuration.IConfiguration configuration)
+        {
+            var overrideSection = configuration.GetSection("Serilog:MinimumLevel:Override");
+            foreach (var child in overrideSection.GetChildren())
+            {
+                if (string.IsNullOrWhiteSpace(child.Key) || string.IsNullOrWhiteSpace(child.Value))
+                {
+                    continue;
+                }
+
+                if (!Enum.TryParse<LogEventLevel>(child.Value, out var level))
+                {
+                    continue;
+                }
+
+                loggerConfig.MinimumLevel.Override(child.Key, level);
+            }
         }
 
         private static LogEventLevel GetMinimumLevel(IConfiguration configuration)

@@ -32,10 +32,20 @@ namespace MqttRelayService.Services.Implementations.Decorators
         public async Task<bool> EnqueueAsync(ForwardMessage message, CancellationToken cancellationToken = default)
         {
             var isFirstReceipt = message.Status == MessageProcessStatus.Received;
+            if (isFirstReceipt)
+            {
+                // 首次接收的 Queued 审计必须先于真实入队完成，避免高并发下消费者已写入终态后，
+                // 迟到的首次入队指标再把同一 MessageId 重新覆盖回 Queued。
+                _metrics.RecordReceived(message, isFirstReceipt: true);
+            }
+
             var success = await _inner.EnqueueAsync(message, cancellationToken);
             if (success)
             {
-                _metrics.RecordReceived(message, isFirstReceipt);
+                if (!isFirstReceipt)
+                {
+                    _metrics.RecordReceived(message, isFirstReceipt: false);
+                }
             }
             else
             {
