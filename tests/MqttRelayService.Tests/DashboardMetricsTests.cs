@@ -225,11 +225,11 @@ namespace MqttRelayService.Tests
         }
 
         [Fact]
-        public async Task MetricsService_GetDashboardDataAsync_WithAuditRepository_ShouldStillUseLiveInMemoryCounters()
+        public async Task MetricsService_InitializeDashboardCountersFromAuditAsync_ShouldSeedInMemoryCounters()
         {
             var now = DateTime.Now;
             _mockAuditRepository
-                .Setup(r => r.GetDashboardMessageSummaryAsync(100))
+                .Setup(r => r.GetDashboardMessageSummaryAsync(1))
                 .ReturnsAsync((
                     TotalMessages: 12,
                     TotalPending: 4,
@@ -264,6 +264,8 @@ namespace MqttRelayService.Tests
                 _mockAuditRepository.Object,
                 _mockLogger.Object);
 
+            await metricsService.InitializeDashboardCountersFromAuditAsync();
+
             var message = new ForwardMessage
             {
                 MessageId = "live_msg_1",
@@ -284,10 +286,10 @@ namespace MqttRelayService.Tests
             var result = await metricsService.GetDashboardDataAsync();
 
             dynamic data = result;
-            Assert.Equal(1L, (long)data.Counters.TotalReceived);
-            Assert.Equal(1L, (long)data.Counters.TotalSucceeded);
-            Assert.Equal(0L, (long)data.Counters.TotalFailed);
-            Assert.Equal(0L, (long)data.Counters.TotalDeadLetter);
+            Assert.Equal(13L, (long)data.Counters.TotalReceived);
+            Assert.Equal(9L, (long)data.Counters.TotalSucceeded);
+            Assert.Equal(3L, (long)data.Counters.TotalFailed);
+            Assert.Equal(1L, (long)data.Counters.TotalDeadLetter);
 
             var logs = (List<object>)data.Logs;
             Assert.Single(logs);

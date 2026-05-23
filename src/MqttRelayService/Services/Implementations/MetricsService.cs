@@ -32,8 +32,14 @@ namespace MqttRelayService.Services.Implementations
         private readonly CancellationTokenSource _auditWriterCts = new();
         private readonly ConcurrentDictionary<string, MessageAuditRecord> _pendingMessageAudits = new();
         private readonly SemaphoreSlim _pendingAuditSignal = new(0);
+        private readonly SemaphoreSlim _dashboardBaselineLock = new(1, 1);
         private readonly Task? _auditWriterTask;
         private int _auditFlushRequested;
+        private bool _dashboardBaselineInitialized;
+        private long _dashboardBaselineReceived;
+        private long _dashboardBaselineSucceeded;
+        private long _dashboardBaselineFailed;
+        private long _dashboardBaselineDeadLetter;
 
         // 原子计数器
         private long _totalReceived;
@@ -376,6 +382,37 @@ namespace MqttRelayService.Services.Implementations
             }
         }
 
+        /// <summary>
+        /// 在服务启动阶段从审计库加载一次累计基线，后续运行期继续只使用内存原子计数增量。
+        /// </summary>
+        public async Task InitializeDashboardCountersFromAuditAsync()
+        {
+            if (_auditRepository == null || _dashboardBaselineInitialized)
+            {
+                return;
+            }
+
+            await _dashboardBaselineLock.WaitAsync();
+            try
+            {
+                if (_dashboardBaselineInitialized)
+                {
+                    return;
+                }
+
+                var summary = await _auditRepository.GetDashboardMessageSummaryAsync(1);
+                _dashboardBaselineReceived = Math.Max(0, summary.TotalMessages);
+                _dashboardBaselineSucceeded = Math.Max(0, summary.TotalSucceeded);
+                _dashboardBaselineFailed = Math.Max(0, summary.TotalFailed);
+                _dashboardBaselineDeadLetter = Math.Max(0, summary.TotalDeadLetter);
+                _dashboardBaselineInitialized = true;
+            }
+            finally
+            {
+                _dashboardBaselineLock.Release();
+            }
+        }
+
         private async Task WriteAuditBatchOrRequeueAsync(IReadOnlyCollection<MessageAuditRecord> batch)
         {
             if (_auditRepository == null || batch.Count == 0)
@@ -625,10 +662,10 @@ namespace MqttRelayService.Services.Implementations
                 history = _historySnapshots.ToList();
             }
 
-            var totalReceived = Interlocked.Read(ref _totalReceived);
-            var totalSucceeded = Interlocked.Read(ref _totalSucceeded);
-            var totalFailed = Interlocked.Read(ref _totalFailed);
-            var totalDeadLetter = Interlocked.Read(ref _totalDeadLetter);
+            var totalReceived = _dashboardBaselineReceived + Interlocked.Read(ref _totalReceived);
+            var totalSucceeded = _dashboardBaselineSucceeded + Interlocked.Read(ref _totalSucceeded);
+            var totalFailed = _dashboardBaselineFailed + Interlocked.Read(ref _totalFailed);
+            var totalDeadLetter = _dashboardBaselineDeadLetter + Interlocked.Read(ref _totalDeadLetter);
             var totalPending = _queue.Count;
             IEnumerable<object> logs = _messageLogs.Values.OrderByDescending(x => x.SystemTimestamp).Cast<object>().ToList();
 

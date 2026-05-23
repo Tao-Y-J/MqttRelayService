@@ -83,6 +83,11 @@ namespace MqttRelayService
             {
                 var auditRepository = scope.ServiceProvider.GetRequiredService<IAuditRepository>();
                 auditRepository.InitializeAsync().GetAwaiter().GetResult();
+
+                if (scope.ServiceProvider.GetRequiredService<IMetricsService>() is MetricsService metricsService)
+                {
+                    metricsService.InitializeDashboardCountersFromAuditAsync().GetAwaiter().GetResult();
+                }
             }
 
             MapWebEndpoints(app);
