@@ -955,7 +955,7 @@
                             <!-- MPS 滑动条 -->
                             <div>
                                 <div style="display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 0.3rem;">
-                                    <span style="color: var(--text-secondary); font-weight: 500;">每秒最大转发量 (MPS)</span>
+                                    <span style="color: var(--text-secondary); font-weight: 500;">单线程最大转发量 (MPS)</span>
                                     <span id="val-mps" class="code-bold" style="color: var(--color-cyan);">无限制</span>
                                 </div>
                                 <input type="range" id="slider-mps" min="0" max="200" step="5" value="0" oninput="onMpsSliderChange(this.value)" onchange="applyThroughputSettings()">
@@ -1650,7 +1650,7 @@
                 display.textContent = '无限制';
                 display.style.color = 'var(--text-secondary)';
             } else {
-                display.textContent = val + ' msgs/sec';
+                display.textContent = val + ' msgs/sec/thread';
                 display.style.color = 'var(--color-cyan)';
             }
         }

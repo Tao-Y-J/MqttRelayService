@@ -1,12 +1,11 @@
 using System;
-using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace MqttRelayService.Utilities
 {
     /// <summary>
-    /// 吞吐量及并发控制器，支持动态暂停、限流 (MPS) 和并发度调节 (1-50)
+    /// 吞吐量与并发控制器，支持动态暂停、单线程速率限制和并发度调节。
     /// </summary>
     public class ThroughputController
     {
@@ -14,28 +13,24 @@ namespace MqttRelayService.Utilities
         private readonly object _rateLock = new();
 
         private bool _isPaused;
-        private int _maxMessagesPerSecond = 0; // 0 表示无限制
-        private int _maxConcurrency = 50;      // 动态并发数，默认 50
-        private int _activeCount = 0;          // 当前活跃的消费线程数
+        private int _maxMessagesPerSecond = 0;
+        private int _maxConcurrency = 50;
+        private int _activeCount = 0;
 
-        // 暂停控制的 TaskCompletionSource
         private TaskCompletionSource _pauseTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        // 并发阻塞控制的 TaskCompletionSource
         private TaskCompletionSource _concurrencyTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        // 令牌桶状态
         private double _tokens = 0;
         private DateTime _lastRefill = DateTime.Now;
 
         public ThroughputController()
         {
-            // 默认初始状态非暂停，TCS 处于完成状态
             _pauseTcs.TrySetResult();
             _concurrencyTcs.TrySetResult();
         }
 
         /// <summary>
-        /// 是否处于暂停状态
+        /// 是否处于暂停状态。
         /// </summary>
         public bool IsPaused
         {
@@ -49,7 +44,7 @@ namespace MqttRelayService.Utilities
         }
 
         /// <summary>
-        /// 每秒最大消息吞吐量 (MPS)
+        /// 单线程每秒最大转发量。0 表示不限速。
         /// </summary>
         public int MaxMessagesPerSecond
         {
@@ -63,7 +58,7 @@ namespace MqttRelayService.Utilities
         }
 
         /// <summary>
-        /// 动态最大并发数
+        /// 最大并发工作线程数。
         /// </summary>
         public int MaxConcurrency
         {
@@ -77,7 +72,7 @@ namespace MqttRelayService.Utilities
         }
 
         /// <summary>
-        /// 当前正处于转发处理中的活跃线程数
+        /// 当前处于转发中的活动工作线程数。
         /// </summary>
         public int ActiveCount
         {
@@ -91,7 +86,7 @@ namespace MqttRelayService.Utilities
         }
 
         /// <summary>
-        /// 一键暂停转发服务
+        /// 一键暂停转发服务。
         /// </summary>
         public void Pause()
         {
@@ -106,7 +101,7 @@ namespace MqttRelayService.Utilities
         }
 
         /// <summary>
-        /// 恢复转发服务
+        /// 恢复转发服务。
         /// </summary>
         public void Resume()
         {
@@ -121,7 +116,7 @@ namespace MqttRelayService.Utilities
         }
 
         /// <summary>
-        /// 动态更新吞吐速率限制
+        /// 动态更新单线程每秒最大转发量。
         /// </summary>
         public void UpdateMaxMessagesPerSecond(int mps)
         {
@@ -129,21 +124,21 @@ namespace MqttRelayService.Utilities
             {
                 _maxMessagesPerSecond = Math.Max(0, mps);
             }
+
             lock (_rateLock)
             {
-                // 速率变化时，重置令牌桶，避免速率瞬间调整后的意外长等待
-                _tokens = _maxMessagesPerSecond;
+                _tokens = GetEffectiveRatePerSecond();
                 _lastRefill = DateTime.Now;
             }
         }
 
         /// <summary>
-        /// 当最大并发度更新时触发此事件
+        /// 当最大并发度更新时触发此事件。
         /// </summary>
         public event Action<int>? ConcurrencyChanged;
 
         /// <summary>
-        /// 动态更新最大活跃并发度
+        /// 动态更新最大活动并发度。
         /// </summary>
         public void UpdateMaxConcurrency(int maxConcurrency)
         {
@@ -156,11 +151,12 @@ namespace MqttRelayService.Utilities
                 _concurrencyTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                 oldTcs.TrySetResult();
             }
+
             ConcurrencyChanged?.Invoke(updated);
         }
 
         /// <summary>
-        /// 消费线程进入转发链路前的拦截与协调
+        /// 消费线程进入转发链路前的拦截与协调。
         /// </summary>
         public async Task WaitAsync(CancellationToken cancellationToken)
         {
@@ -173,32 +169,27 @@ namespace MqttRelayService.Utilities
 
                 lock (_lock)
                 {
-                    // 1. 检查是否暂停
                     if (_isPaused)
                     {
                         pauseTask = _pauseTcs.Task;
                     }
-                    // 2. 检查并发是否超限
                     else if (_activeCount >= _maxConcurrency)
                     {
                         concurrencyTask = _concurrencyTcs.Task;
                     }
                     else
                     {
-                        // 占用并发槽位
                         _activeCount++;
                         break;
                     }
                 }
 
-                // 如果暂停，非阻塞等待恢复信号
                 if (pauseTask != null)
                 {
                     await pauseTask;
                     continue;
                 }
 
-                // 如果并发满额，轻量休眠或等待信号，避免高频自旋
                 if (concurrencyTask != null)
                 {
                     await Task.Delay(10, cancellationToken);
@@ -206,12 +197,11 @@ namespace MqttRelayService.Utilities
                 }
             }
 
-            // 3. 限流 (MPS) 协调
             await ApplyRateLimitingAsync(cancellationToken);
         }
 
         /// <summary>
-        /// 释放并发占用槽位，并通知等待线程
+        /// 释放并发占用槽位，并通知等待线程。
         /// </summary>
         public void Release()
         {
@@ -229,22 +219,19 @@ namespace MqttRelayService.Utilities
         }
 
         /// <summary>
-        /// 基于高精令牌桶的速率控制器
+        /// 以“活动线程数 × 单线程 MPS”作为全局补充速率，保持单线程调控语义。
         /// </summary>
         private async Task ApplyRateLimitingAsync(CancellationToken cancellationToken)
         {
-            int mps;
-            lock (_lock)
+            if (MaxMessagesPerSecond <= 0)
             {
-                mps = _maxMessagesPerSecond;
+                return;
             }
-
-            if (mps <= 0) return; // 0 表示无限制
 
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                double delayMs = 0;
+                double delayMs;
 
                 lock (_rateLock)
                 {
@@ -252,29 +239,44 @@ namespace MqttRelayService.Utilities
                     var elapsed = (now - _lastRefill).TotalSeconds;
                     _lastRefill = now;
 
-                    // 计算并补充令牌
-                    _tokens += elapsed * mps;
-                    if (_tokens > mps)
+                    var effectiveRate = GetEffectiveRatePerSecond();
+                    if (effectiveRate <= 0)
                     {
-                        _tokens = mps; // 限制积攒上限，防止瞬时 Burst 突发洪峰
+                        return;
+                    }
+
+                    _tokens += elapsed * effectiveRate;
+                    if (_tokens > effectiveRate)
+                    {
+                        _tokens = effectiveRate;
                     }
 
                     if (_tokens >= 1.0)
                     {
                         _tokens -= 1.0;
-                        break; // 成功获取令牌，允许通过
+                        break;
                     }
 
-                    // 令牌不足，计算到下一个令牌产生的理论等待毫秒数
-                    double needed = 1.0 - _tokens;
-                    delayMs = (needed / mps) * 1000.0;
+                    var needed = 1.0 - _tokens;
+                    delayMs = (needed / effectiveRate) * 1000.0;
                 }
 
-                if (delayMs > 0)
+                var sleepTime = Math.Clamp((int)delayMs, 1, 1000);
+                await Task.Delay(sleepTime, cancellationToken);
+            }
+        }
+
+        private int GetEffectiveRatePerSecond()
+        {
+            lock (_lock)
+            {
+                if (_maxMessagesPerSecond <= 0)
                 {
-                    int sleepTime = Math.Clamp((int)delayMs, 1, 1000);
-                    await Task.Delay(sleepTime, cancellationToken);
+                    return 0;
                 }
+
+                var activeWorkers = Math.Max(_activeCount, 1);
+                return _maxMessagesPerSecond * activeWorkers;
             }
         }
     }

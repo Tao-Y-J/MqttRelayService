@@ -145,5 +145,32 @@ namespace MqttRelayService.Tests
             // Assert: 至少耗时 150ms (预留足够余量避免高频跑马机测试抖动导致的失败)
             Assert.True(stopwatch.ElapsedMilliseconds >= 150, $"Elapsed was {stopwatch.ElapsedMilliseconds}ms, which should be >= 150ms");
         }
+        [Fact]
+        public async Task RateLimiting_ShouldApplyPerConsumerInsteadOfGlobalSharedBucket()
+        {
+            var controller = new ThroughputController();
+            controller.UpdateMaxMessagesPerSecond(2);
+            controller.UpdateMaxConcurrency(2);
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+            async Task<long> RunSingleConsumerAsync()
+            {
+                var sw = Stopwatch.StartNew();
+                for (int i = 0; i < 4; i++)
+                {
+                    await controller.WaitAsync(cts.Token);
+                    controller.Release();
+                }
+
+                sw.Stop();
+                return sw.ElapsedMilliseconds;
+            }
+
+            var elapsed = await Task.WhenAll(RunSingleConsumerAsync(), RunSingleConsumerAsync());
+
+            Assert.All(elapsed, ms => Assert.True(ms >= 400, $"Elapsed was {ms}ms, expected throughput control to remain effective."));
+            Assert.All(elapsed, ms => Assert.True(ms < 3200, $"Elapsed was {ms}ms, expected active concurrency to increase total throughput instead of staying capped by a global 2 MPS bucket."));
+        }
     }
 }

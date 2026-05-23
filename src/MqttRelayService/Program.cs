@@ -358,7 +358,7 @@ namespace MqttRelayService
     }
 
     /// <summary>
-    /// 吞吐量调控传输参数。
+    /// 吞吐量调控传输参数，MaxMessagesPerSecond 表示单线程每秒最大转发量。
     /// </summary>
     public record ThroughputSettingsDto(int MaxMessagesPerSecond, int MaxConcurrency);
 }
