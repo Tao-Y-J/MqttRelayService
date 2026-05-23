@@ -30,10 +30,10 @@ echo ========================================
 echo [INFO] Python : %PYTHON_EXE%
 echo [INFO] Script : %SCRIPT%
 echo [INFO] Target : 127.0.0.1:1883
-echo [INFO] Rate   : 100 msg/s total
+echo [INFO] Rate   : 1000 msg/s total
 echo.
 
-"%PYTHON_EXE%" "%SCRIPT%" --duration-seconds 60 --rate-limit 100
+"%PYTHON_EXE%" "%SCRIPT%" --duration-seconds 60 --rate-limit 1000
 set "EXITCODE=%errorlevel%"
 
 echo.
