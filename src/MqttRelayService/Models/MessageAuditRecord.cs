@@ -69,6 +69,7 @@ namespace MqttRelayService.Models
         /// <summary>
         /// 首次接收时间。
         /// </summary>
+        [SugarColumn(IndexGroupNameList = new string[] { "idx_created_at" })]
         public DateTime CreatedAt { get; set; }
 
         /// <summary>

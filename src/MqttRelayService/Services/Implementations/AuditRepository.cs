@@ -28,6 +28,11 @@ namespace MqttRelayService.Services.Implementations
         private long _clientInsertCounter;
         private bool _schemaEnsured;
 
+        /// <summary>
+        /// 正在执行清理的历史状态标志，防止多线程清理任务堆积排队造成线程池饥饿。
+        /// </summary>
+        private int _isCleaningUp = 0;
+
         public AuditRepository(IOptions<AuditStorageOptions> options, ILogger<AuditRepository> logger)
             : this(options.Value, logger)
         {
@@ -173,7 +178,7 @@ namespace MqttRelayService.Services.Implementations
                 }
 
                 var val = Interlocked.Increment(ref _messageInsertCounter);
-                if (val % 100 == 0)
+                if (val % 5000 == 0)
                 {
                     _ = Task.Run(() => CleanupHistoryAsync(_options.MessageRetentionCount, _options.ClientHistoryRetentionCount));
                 }
@@ -217,7 +222,7 @@ namespace MqttRelayService.Services.Implementations
                 });
 
                 var val = Interlocked.Add(ref _messageInsertCounter, records.Count);
-                if (val / 100 > (val - records.Count) / 100)
+                if (val / 5000 > (val - records.Count) / 5000)
                 {
                     _ = Task.Run(() => CleanupHistoryAsync(_options.MessageRetentionCount, _options.ClientHistoryRetentionCount));
                 }
@@ -241,7 +246,7 @@ namespace MqttRelayService.Services.Implementations
                 await _db.Insertable(record).ExecuteCommandAsync();
 
                 var val = Interlocked.Increment(ref _clientInsertCounter);
-                if (val % 100 == 0)
+                if (val % 5000 == 0)
                 {
                     _ = Task.Run(() => CleanupHistoryAsync(_options.MessageRetentionCount, _options.ClientHistoryRetentionCount));
                 }
@@ -366,34 +371,50 @@ namespace MqttRelayService.Services.Implementations
 
         public async Task CleanupHistoryAsync(int keepMessagesCount, int keepClientHistoryCount)
         {
+            if (Interlocked.Exchange(ref _isCleaningUp, 1) == 1)
+            {
+                // 已经有清理任务在运行，直接丢弃本次触发，防止并发堆积造成线程池饥饿
+                return;
+            }
+
             await _writeLock.WaitAsync();
             try
             {
                 await EnsureSchemaAsync();
 
-                var keepMessageIds = await _db.Queryable<MessageAuditRecord>()
+                var deletedMessages = 0;
+                var deletedClients = 0;
+
+                // 使用 ORM 方法获取最新的消息审计边界时间
+                var boundaryMsg = await _db.Queryable<MessageAuditRecord>()
                     .OrderBy(x => x.CreatedAt, OrderByType.Desc)
-                    .Take(keepMessagesCount)
-                    .Select(x => x.MessageId)
-                    .ToListAsync();
+                    .Skip(keepMessagesCount - 1)
+                    .Take(1)
+                    .FirstAsync();
 
-                var keepClientIds = await _db.Queryable<ClientConnectionHistoryRecord>()
+                // 使用 ORM 方法获取最新的客户端历史边界时间
+                var boundaryClient = await _db.Queryable<ClientConnectionHistoryRecord>()
                     .OrderBy(x => x.Timestamp, OrderByType.Desc)
-                    .Take(keepClientHistoryCount)
-                    .Select(x => x.Id)
-                    .ToListAsync();
+                    .Skip(keepClientHistoryCount - 1)
+                    .Take(1)
+                    .FirstAsync();
 
-                var deletedMessages = keepMessageIds.Count == 0
-                    ? await _db.Deleteable<MessageAuditRecord>().ExecuteCommandAsync()
-                    : await _db.Deleteable<MessageAuditRecord>()
-                        .Where(x => !keepMessageIds.Contains(x.MessageId))
-                        .ExecuteCommandAsync();
+                await _db.UseTranAsync(async () =>
+                {
+                    if (boundaryMsg != null)
+                    {
+                        deletedMessages = await _db.Deleteable<MessageAuditRecord>()
+                            .Where(x => x.CreatedAt < boundaryMsg.CreatedAt)
+                            .ExecuteCommandAsync();
+                    }
 
-                var deletedClients = keepClientIds.Count == 0
-                    ? await _db.Deleteable<ClientConnectionHistoryRecord>().ExecuteCommandAsync()
-                    : await _db.Deleteable<ClientConnectionHistoryRecord>()
-                        .Where(x => !keepClientIds.Contains(x.Id))
-                        .ExecuteCommandAsync();
+                    if (boundaryClient != null)
+                    {
+                        deletedClients = await _db.Deleteable<ClientConnectionHistoryRecord>()
+                            .Where(x => x.Timestamp < boundaryClient.Timestamp)
+                            .ExecuteCommandAsync();
+                    }
+                });
 
                 if (deletedMessages > 0 || deletedClients > 0)
                 {
@@ -410,6 +431,7 @@ namespace MqttRelayService.Services.Implementations
             finally
             {
                 _writeLock.Release();
+                Interlocked.Exchange(ref _isCleaningUp, 0);
             }
         }
     }

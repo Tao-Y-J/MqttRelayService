@@ -290,22 +290,36 @@ namespace MqttRelayService.Services.Implementations
 
         private async Task ProcessPendingAuditsAsync()
         {
-            while (true)
+            while (!_auditWriterCts.Token.IsCancellationRequested)
             {
                 try
                 {
-                    await _pendingAuditSignal.WaitAsync(_auditWriterCts.Token);
-                }
-                catch (OperationCanceledException) when (_auditWriterCts.IsCancellationRequested)
-                {
-                    break;
-                }
+                    try
+                    {
+                        await _pendingAuditSignal.WaitAsync(_auditWriterCts.Token);
+                    }
+                    catch (OperationCanceledException) when (_auditWriterCts.IsCancellationRequested)
+                    {
+                        break;
+                    }
 
-                Interlocked.Exchange(ref _auditFlushRequested, 0);
-                await FlushPendingAuditsAsync();
+                    Interlocked.Exchange(ref _auditFlushRequested, 0);
+                    await FlushPendingAuditsAsync();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "后台审计日志写入循环发生未捕获致命异常");
+                }
             }
 
-            await FlushPendingAuditsAsync();
+            try
+            {
+                await FlushPendingAuditsAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "服务停机时排空审计日志发生异常");
+            }
         }
 
         private async Task FlushPendingAuditsAsync()

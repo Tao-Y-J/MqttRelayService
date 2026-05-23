@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using SqlSugar;
 
 namespace MqttRelayService.Models
@@ -45,6 +45,7 @@ namespace MqttRelayService.Models
         /// <summary>
         /// 事件记录时间。
         /// </summary>
+        [SugarColumn(IndexGroupNameList = new string[] { "idx_timestamp" })]
         public DateTime Timestamp { get; set; }
     }
 }
