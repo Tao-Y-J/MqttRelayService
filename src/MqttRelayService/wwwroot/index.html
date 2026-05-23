@@ -958,7 +958,7 @@
                                     <span style="color: var(--text-secondary); font-weight: 500;">单线程最大转发量 (MPS)</span>
                                     <span id="val-mps" class="code-bold" style="color: var(--color-cyan);">无限制</span>
                                 </div>
-                                <input type="range" id="slider-mps" min="0" max="6" step="1" value="6" oninput="onMpsSliderChange(this.value)" onchange="applyThroughputSettings()">
+                                <input type="range" id="slider-mps" min="0" max="6" step="1" value="6" oninput="onMpsSliderInput(this.value)">
                             </div>
                             <!-- 并发度滑动条 -->
                             <div>
@@ -966,7 +966,7 @@
                                     <span style="color: var(--text-secondary); font-weight: 500;">活跃并发工作线程</span>
                                     <span id="val-concurrency" class="code-bold" style="color: var(--color-purple);">50 线程</span>
                                 </div>
-                                <input type="range" id="slider-concurrency" min="1" max="50" step="1" value="50" oninput="onConcurrencySliderChange(this.value)" onchange="applyThroughputSettings()">
+                                <input type="range" id="slider-concurrency" min="1" max="50" step="1" value="50" oninput="onConcurrencySliderInput(this.value)">
                             </div>
                         </div>
                     </div>
@@ -1431,11 +1431,13 @@
         let currentTab = 'dashboard';
         let rawMetrics = null;
         const mpsSliderStops = [100, 200, 500, 1000, 3000, 10000, 0];
+        const throughputSyncDebounceMs = 400;
         let throughputSettings = {
             maxMessagesPerSecond: 0,
             maxConcurrency: 50,
             activeCount: 0
         };
+        let throughputSyncTimer = null;
 
         // 1. 在线客户端分页状态
         let clientsPage = 1;
@@ -1600,9 +1602,6 @@
                 if (!response.ok) throw new Error('接口请求失败');
                 rawMetrics = await response.json();
 
-                // 2. 获取实时吞吐控制状态
-                await fetchThroughputSettingsSilently();
-
                 updateDashboardUI();
             } catch (err) {
                 console.error('获取指标失败:', err);
@@ -1612,7 +1611,6 @@
             }
         }
 
-        // 静默同步吞吐调控参数，保持滑块状态与后端一致
         async function fetchThroughputSettings() {
             try {
                 const response = await fetch('/api/settings/throughput');
@@ -1622,14 +1620,6 @@
                 }
             } catch (err) {
                 console.error('获取吞吐量配置失败:', err);
-            }
-        }
-
-        async function fetchThroughputSettingsSilently() {
-            const response = await fetch('/api/settings/throughput');
-            if (response.ok) {
-                throughputSettings = await response.json();
-                syncSlidersUI();
             }
         }
 
@@ -1667,10 +1657,31 @@
             }
         }
 
+        function scheduleThroughputSettingsSync() {
+            if (throughputSyncTimer !== null) {
+                clearTimeout(throughputSyncTimer);
+            }
+
+            throughputSyncTimer = setTimeout(() => {
+                throughputSyncTimer = null;
+                applyThroughputSettings();
+            }, throughputSyncDebounceMs);
+        }
+
+        function onMpsSliderInput(val) {
+            onMpsSliderChange(val);
+            scheduleThroughputSettingsSync();
+        }
+
         function onConcurrencySliderChange(val) {
             const display = document.getElementById('val-concurrency');
             display.textContent = val + ' 线程';
             display.style.color = 'var(--color-purple)';
+        }
+
+        function onConcurrencySliderInput(val) {
+            onConcurrencySliderChange(val);
+            scheduleThroughputSettingsSync();
         }
 
         // 物理提交流控配置更新到后端 API
@@ -2382,9 +2393,6 @@
 
             // 1 秒主面板大屏异步高频轮询，保证秒级响应
             setInterval(fetchMetrics, 1000);
-
-            // 每 10 秒静默重新对齐一次吞吐控制面板滑块，防并发覆盖
-            setInterval(fetchThroughputSettingsSilently, 10000);
         });
     </script>
 </body>
