@@ -232,6 +232,7 @@ namespace MqttRelayService.Tests
                 .Setup(r => r.GetDashboardMessageSummaryAsync(100))
                 .ReturnsAsync((
                     TotalMessages: 12,
+                    TotalPending: 4,
                     TotalSucceeded: 8,
                     TotalFailed: 3,
                     TotalDeadLetter: 1,
@@ -283,16 +284,73 @@ namespace MqttRelayService.Tests
             var result = await metricsService.GetDashboardDataAsync();
 
             dynamic data = result;
-            Assert.Equal(1L, (long)data.Counters.TotalReceived);
-            Assert.Equal(1L, (long)data.Counters.TotalSucceeded);
-            Assert.Equal(0L, (long)data.Counters.TotalFailed);
-            Assert.Equal(0L, (long)data.Counters.TotalDeadLetter);
+            Assert.Equal(12L, (long)data.Counters.TotalReceived);
+            Assert.Equal(4L, (long)data.Counters.TotalPending);
+            Assert.Equal(8L, (long)data.Counters.TotalSucceeded);
+            Assert.Equal(3L, (long)data.Counters.TotalFailed);
+            Assert.Equal(1L, (long)data.Counters.TotalDeadLetter);
 
             var logs = (List<object>)data.Logs;
             Assert.Single(logs);
             dynamic log = logs[0];
             Assert.Equal("live_msg_1", (string)log.MessageId);
             Assert.Equal("Succeeded", (string)log.Status);
+        }
+
+        [Fact]
+        public async Task MetricsService_RecordReceived_AfterSucceeded_ShouldNotOverwriteTerminalAuditState()
+        {
+            var now = DateTime.Now;
+            var persistedTerminalState = new TaskCompletionSource<MessageAuditRecord>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            _mockAuditRepository
+                .Setup(r => r.RecordMessageAuditsAsync(It.IsAny<IReadOnlyList<MessageAuditRecord>>()))
+                .Callback<IReadOnlyList<MessageAuditRecord>>(records =>
+                {
+                    var record = records.SingleOrDefault(r => r.MessageId == "terminal_msg_1");
+                    if (record != null && record.Status == "Succeeded")
+                    {
+                        persistedTerminalState.TrySetResult(record);
+                    }
+                })
+                .Returns(Task.CompletedTask);
+
+            using var metricsService = new MetricsService(
+                _queue,
+                _mockClientRegistry.Object,
+                _serviceOptions,
+                _mqttOptions,
+                _reliabilityOptions,
+                _mockAuditRepository.Object,
+                _mockLogger.Object);
+
+            var message = new ForwardMessage
+            {
+                MessageId = "terminal_msg_1",
+                RouteContext = new RouteContext
+                {
+                    MessageId = "terminal_msg_1",
+                    Topic = "terminal/topic",
+                    Payload = new byte[] { 1, 2, 3 },
+                    QoS = 1,
+                    Retain = false,
+                    SourceClientId = "terminal_client",
+                    Timestamp = now
+                }
+            };
+
+            metricsService.RecordReceived(message);
+            metricsService.RecordForwarded(message.RouteContext, success: true, retryCount: 0, latencyMs: 9.6, isSubscriberHit: false);
+
+            message.Status = MessageProcessStatus.Queued;
+            metricsService.RecordReceived(message);
+
+            var completed = await Task.WhenAny(persistedTerminalState.Task, Task.Delay(TimeSpan.FromSeconds(2)));
+            Assert.Same(persistedTerminalState.Task, completed);
+
+            var persistedRecord = await persistedTerminalState.Task;
+            Assert.Equal("Succeeded", persistedRecord.Status);
+            Assert.False(persistedRecord.IsSubscriberHit);
         }
 
         [Fact]

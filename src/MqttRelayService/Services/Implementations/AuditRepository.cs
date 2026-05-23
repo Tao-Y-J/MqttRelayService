@@ -24,14 +24,11 @@ namespace MqttRelayService.Services.Implementations
         private readonly SqlSugarScope _db;
         private readonly string? _sqliteDataSourcePath;
 
-        private long _messageInsertCounter;
-        private long _clientInsertCounter;
         private bool _schemaEnsured;
 
         /// <summary>
         /// 正在执行清理的历史状态标志，防止多线程清理任务堆积排队造成线程池饥饿。
         /// </summary>
-        private int _isCleaningUp = 0;
 
         public AuditRepository(IOptions<AuditStorageOptions> options, ILogger<AuditRepository> logger)
             : this(options.Value, logger)
@@ -177,11 +174,6 @@ namespace MqttRelayService.Services.Implementations
                     await _db.Insertable(record).ExecuteCommandAsync();
                 }
 
-                var val = Interlocked.Increment(ref _messageInsertCounter);
-                if (val % 5000 == 0)
-                {
-                    _ = Task.Run(() => CleanupHistoryAsync(_options.MessageRetentionCount, _options.ClientHistoryRetentionCount));
-                }
             }
             catch (Exception ex)
             {
@@ -221,11 +213,6 @@ namespace MqttRelayService.Services.Implementations
                     }
                 });
 
-                var val = Interlocked.Add(ref _messageInsertCounter, records.Count);
-                if (val / 5000 > (val - records.Count) / 5000)
-                {
-                    _ = Task.Run(() => CleanupHistoryAsync(_options.MessageRetentionCount, _options.ClientHistoryRetentionCount));
-                }
             }
             catch (Exception ex)
             {
@@ -245,11 +232,6 @@ namespace MqttRelayService.Services.Implementations
                 await EnsureSchemaAsync();
                 await _db.Insertable(record).ExecuteCommandAsync();
 
-                var val = Interlocked.Increment(ref _clientInsertCounter);
-                if (val % 5000 == 0)
-                {
-                    _ = Task.Run(() => CleanupHistoryAsync(_options.MessageRetentionCount, _options.ClientHistoryRetentionCount));
-                }
             }
             catch (Exception ex)
             {
@@ -341,6 +323,7 @@ namespace MqttRelayService.Services.Implementations
 
         public async Task<(
             int TotalMessages,
+            int TotalPending,
             int TotalSucceeded,
             int TotalFailed,
             int TotalDeadLetter,
@@ -352,6 +335,9 @@ namespace MqttRelayService.Services.Implementations
 
                 var query = _db.Queryable<MessageAuditRecord>();
                 var totalMessages = await query.Clone().CountAsync();
+                var totalPending = await query.Clone()
+                    .Where(x => x.Status == "Queued" || x.Status == "Routing" || x.Status == "Forwarding")
+                    .CountAsync();
                 var totalSucceeded = await query.Clone().Where(x => x.Status == "Succeeded").CountAsync();
                 var totalFailed = await query.Clone().Where(x => x.Status == "Failed").CountAsync();
                 var totalDeadLetter = await query.Clone().Where(x => x.Status == "DeadLetter").CountAsync();
@@ -360,79 +346,14 @@ namespace MqttRelayService.Services.Implementations
                     .Take(recentCount)
                     .ToListAsync();
 
-                return (totalMessages, totalSucceeded, totalFailed, totalDeadLetter, recentItems);
+                return (totalMessages, totalPending, totalSucceeded, totalFailed, totalDeadLetter, recentItems);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "获取 Dashboard 审计摘要失败");
-                return (0, 0, 0, 0, Array.Empty<MessageAuditRecord>());
+                return (0, 0, 0, 0, 0, Array.Empty<MessageAuditRecord>());
             }
         }
 
-        public async Task CleanupHistoryAsync(int keepMessagesCount, int keepClientHistoryCount)
-        {
-            if (Interlocked.Exchange(ref _isCleaningUp, 1) == 1)
-            {
-                // 已经有清理任务在运行，直接丢弃本次触发，防止并发堆积造成线程池饥饿
-                return;
-            }
-
-            await _writeLock.WaitAsync();
-            try
-            {
-                await EnsureSchemaAsync();
-
-                var deletedMessages = 0;
-                var deletedClients = 0;
-
-                // 使用 ORM 方法获取最新的消息审计边界时间
-                var boundaryMsg = await _db.Queryable<MessageAuditRecord>()
-                    .OrderBy(x => x.CreatedAt, OrderByType.Desc)
-                    .Skip(keepMessagesCount - 1)
-                    .Take(1)
-                    .FirstAsync();
-
-                // 使用 ORM 方法获取最新的客户端历史边界时间
-                var boundaryClient = await _db.Queryable<ClientConnectionHistoryRecord>()
-                    .OrderBy(x => x.Timestamp, OrderByType.Desc)
-                    .Skip(keepClientHistoryCount - 1)
-                    .Take(1)
-                    .FirstAsync();
-
-                await _db.UseTranAsync(async () =>
-                {
-                    if (boundaryMsg != null)
-                    {
-                        deletedMessages = await _db.Deleteable<MessageAuditRecord>()
-                            .Where(x => x.CreatedAt < boundaryMsg.CreatedAt)
-                            .ExecuteCommandAsync();
-                    }
-
-                    if (boundaryClient != null)
-                    {
-                        deletedClients = await _db.Deleteable<ClientConnectionHistoryRecord>()
-                            .Where(x => x.Timestamp < boundaryClient.Timestamp)
-                            .ExecuteCommandAsync();
-                    }
-                });
-
-                if (deletedMessages > 0 || deletedClients > 0)
-                {
-                    _logger.LogInformation(
-                        "审计历史自动清理完成，已清理 {MsgCount} 条消息记录，{ClientCount} 条客户端历史",
-                        deletedMessages,
-                        deletedClients);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "清理审计历史数据发生异常");
-            }
-            finally
-            {
-                _writeLock.Release();
-                Interlocked.Exchange(ref _isCleaningUp, 0);
-            }
-        }
     }
 }

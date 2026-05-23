@@ -35,8 +35,8 @@ namespace MqttRelayService.Tests
                 Provider = "Sqlite",
                 ConnectionString = $"Data Source={_dbFile}",
                 AutoInitializeSchema = true,
-                MessageRetentionCount = 20000,
-                ClientHistoryRetentionCount = 5000
+                MessageArchiveThreshold = 20000,
+                ClientHistoryArchiveThreshold = 5000
             };
 
             var loggerMock = new Mock<ILogger<AuditRepository>>();
@@ -154,51 +154,6 @@ namespace MqttRelayService.Tests
         }
 
         [Fact]
-        public async Task CleanupHistoryAsync_ShouldLimitTableSizesCorrectly()
-        {
-            await _repository.InitializeAsync();
-
-            for (int i = 0; i < 15; i++)
-            {
-                await _repository.RecordMessageAuditAsync(new MessageAuditRecord
-                {
-                    MessageId = $"msg_{i:00}",
-                    Topic = "test",
-                    SourceClientId = "test_src",
-                    PayloadSize = 0,
-                    Qos = 0,
-                    Retain = false,
-                    Status = "Queued",
-                    CreatedAt = DateTime.Now.AddMinutes(i),
-                    UpdatedAt = DateTime.Now.AddMinutes(i)
-                });
-            }
-
-            for (int i = 0; i < 10; i++)
-            {
-                await _repository.RecordClientConnectionHistoryAsync(new ClientConnectionHistoryRecord
-                {
-                    ClientId = $"client_{i:00}",
-                    ConnectionId = $"conn_{i}",
-                    Event = "Connected",
-                    Timestamp = DateTime.Now.AddMinutes(i)
-                });
-            }
-
-            await _repository.CleanupHistoryAsync(keepMessagesCount: 5, keepClientHistoryCount: 3);
-
-            var (msgTotal, msgItems) = await _repository.GetPagedMessagesAsync(1, 20);
-            Assert.Equal(5, msgTotal);
-            Assert.Contains(msgItems, m => m.MessageId == "msg_14");
-            Assert.DoesNotContain(msgItems, m => m.MessageId == "msg_00");
-
-            var (clientTotal, clientItems) = await _repository.GetPagedClientHistoryAsync(1, 20);
-            Assert.Equal(3, clientTotal);
-            Assert.Contains(clientItems, c => c.ClientId == "client_09");
-            Assert.DoesNotContain(clientItems, c => c.ClientId == "client_00");
-        }
-
-        [Fact]
         public async Task GetDashboardMessageSummaryAsync_ShouldReturnAuditAlignedCountsAndRecentItems()
         {
             await _repository.InitializeAsync();
@@ -244,12 +199,65 @@ namespace MqttRelayService.Tests
             var summary = await _repository.GetDashboardMessageSummaryAsync(2);
 
             Assert.Equal(3, summary.TotalMessages);
+            Assert.Equal(0, summary.TotalPending);
             Assert.Equal(1, summary.TotalSucceeded);
             Assert.Equal(1, summary.TotalFailed);
             Assert.Equal(1, summary.TotalDeadLetter);
             Assert.Equal(2, summary.RecentItems.Count);
             Assert.Equal("sum_3", summary.RecentItems[0].MessageId);
             Assert.Equal("sum_2", summary.RecentItems[1].MessageId);
+        }
+
+        [Fact]
+        public async Task GetDashboardMessageSummaryAsync_ShouldCountPendingStatusesSeparately()
+        {
+            await _repository.InitializeAsync();
+
+            var now = DateTime.Now;
+            await _repository.RecordMessageAuditAsync(new MessageAuditRecord
+            {
+                MessageId = "pending_1",
+                Topic = "topic/pending/1",
+                SourceClientId = "client_1",
+                PayloadSize = 1,
+                Qos = 0,
+                Retain = false,
+                Status = "Queued",
+                CreatedAt = now.AddSeconds(-3),
+                UpdatedAt = now.AddSeconds(-3)
+            });
+            await _repository.RecordMessageAuditAsync(new MessageAuditRecord
+            {
+                MessageId = "pending_2",
+                Topic = "topic/pending/2",
+                SourceClientId = "client_2",
+                PayloadSize = 1,
+                Qos = 0,
+                Retain = false,
+                Status = "Forwarding",
+                CreatedAt = now.AddSeconds(-2),
+                UpdatedAt = now.AddSeconds(-2)
+            });
+            await _repository.RecordMessageAuditAsync(new MessageAuditRecord
+            {
+                MessageId = "done_1",
+                Topic = "topic/done/1",
+                SourceClientId = "client_3",
+                PayloadSize = 1,
+                Qos = 0,
+                Retain = false,
+                Status = "Succeeded",
+                CreatedAt = now.AddSeconds(-1),
+                UpdatedAt = now.AddSeconds(-1)
+            });
+
+            var summary = await _repository.GetDashboardMessageSummaryAsync(10);
+
+            Assert.Equal(3, summary.TotalMessages);
+            Assert.Equal(2, summary.TotalPending);
+            Assert.Equal(1, summary.TotalSucceeded);
+            Assert.Equal(0, summary.TotalFailed);
+            Assert.Equal(0, summary.TotalDeadLetter);
         }
 
         [Theory]

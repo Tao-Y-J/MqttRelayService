@@ -116,6 +116,7 @@ namespace MqttRelayService.Services.Implementations
         {
             Interlocked.Increment(ref _totalReceived);
             CachePayload(message.MessageId, message.RouteContext.Payload);
+            var isFirstReceipt = message.Status == MessageProcessStatus.Received;
 
             AddOrUpdateLog(new MessageLogEntry
             {
@@ -133,6 +134,11 @@ namespace MqttRelayService.Services.Implementations
                 ErrorMessage = string.Empty,
                 SystemTimestamp = DateTime.Now
             });
+
+            if (!isFirstReceipt)
+            {
+                return;
+            }
 
             EnqueueMessageAudit(new MessageAuditRecord
             {
@@ -280,7 +286,10 @@ namespace MqttRelayService.Services.Implementations
                 return;
             }
 
-            _pendingMessageAudits[record.MessageId] = record;
+            _pendingMessageAudits.AddOrUpdate(
+                record.MessageId,
+                record,
+                (_, existing) => MergeAuditRecord(existing, record));
 
             if (Interlocked.Exchange(ref _auditFlushRequested, 1) == 0)
             {
@@ -481,6 +490,58 @@ namespace MqttRelayService.Services.Implementations
             }
         }
 
+        private static MessageAuditRecord MergeAuditRecord(MessageAuditRecord existing, MessageAuditRecord incoming)
+        {
+            if (ShouldKeepExistingAuditState(existing.Status, incoming.Status))
+            {
+                existing.UpdatedAt = incoming.UpdatedAt;
+                existing.IsSubscriberHit = existing.IsSubscriberHit || incoming.IsSubscriberHit;
+                existing.RetryCount = Math.Max(existing.RetryCount, incoming.RetryCount);
+                existing.LatencyMs = Math.Max(existing.LatencyMs, incoming.LatencyMs);
+                existing.ErrorMessage = PreferNonEmpty(existing.ErrorMessage, incoming.ErrorMessage);
+                existing.Payload = PreferNonEmpty(existing.Payload, incoming.Payload);
+                return existing;
+            }
+
+            existing.Topic = incoming.Topic;
+            existing.SourceClientId = incoming.SourceClientId;
+            existing.PayloadSize = incoming.PayloadSize;
+            existing.Payload = PreferNonEmpty(incoming.Payload, existing.Payload);
+            existing.Qos = incoming.Qos;
+            existing.Retain = incoming.Retain;
+            existing.Status = incoming.Status;
+            existing.IsSubscriberHit = incoming.IsSubscriberHit;
+            existing.LatencyMs = incoming.LatencyMs;
+            existing.RetryCount = incoming.RetryCount;
+            existing.UpdatedAt = incoming.UpdatedAt;
+            existing.ErrorMessage = incoming.ErrorMessage;
+            return existing;
+        }
+
+        private static bool ShouldKeepExistingAuditState(string existingStatus, string incomingStatus)
+        {
+            return GetStatusPriority(existingStatus) > GetStatusPriority(incomingStatus);
+        }
+
+        private static int GetStatusPriority(string status)
+        {
+            return status switch
+            {
+                "DeadLetter" => 5,
+                "Failed" => 4,
+                "Succeeded" => 4,
+                "Forwarding" => 3,
+                "Routing" => 2,
+                "Queued" => 1,
+                _ => 0
+            };
+        }
+
+        private static string? PreferNonEmpty(string? preferred, string? fallback)
+        {
+            return string.IsNullOrWhiteSpace(preferred) ? fallback : preferred;
+        }
+
         private void TakeSnapshot(object? state)
         {
             try
@@ -561,7 +622,18 @@ namespace MqttRelayService.Services.Implementations
             var totalSucceeded = Interlocked.Read(ref _totalSucceeded);
             var totalFailed = Interlocked.Read(ref _totalFailed);
             var totalDeadLetter = Interlocked.Read(ref _totalDeadLetter);
+            var totalPending = _queue.Count;
             IEnumerable<object> logs = _messageLogs.Values.OrderByDescending(x => x.SystemTimestamp).Cast<object>().ToList();
+
+            if (_auditRepository != null)
+            {
+                var summary = await _auditRepository.GetDashboardMessageSummaryAsync(MaxLogCount);
+                totalReceived = summary.TotalMessages;
+                totalPending = summary.TotalPending;
+                totalSucceeded = summary.TotalSucceeded;
+                totalFailed = summary.TotalFailed;
+                totalDeadLetter = summary.TotalDeadLetter;
+            }
 
             return new
             {
@@ -580,6 +652,7 @@ namespace MqttRelayService.Services.Implementations
                 {
                     TotalReceived = totalReceived,
                     TotalRejected = Interlocked.Read(ref _totalRejected),
+                    TotalPending = totalPending,
                     TotalSucceeded = totalSucceeded,
                     TotalFailed = totalFailed,
                     TotalDeadLetter = totalDeadLetter,

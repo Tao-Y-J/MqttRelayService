@@ -58,6 +58,7 @@ namespace MqttRelayService.Services.Abstractions
         /// </summary>
         Task<(
             int TotalMessages,
+            int TotalPending,
             int TotalSucceeded,
             int TotalFailed,
             int TotalDeadLetter,
@@ -66,6 +67,5 @@ namespace MqttRelayService.Services.Abstractions
         /// <summary>
         /// 清理历史数据，保持表规模可控。
         /// </summary>
-        Task CleanupHistoryAsync(int keepMessagesCount, int keepClientHistoryCount);
     }
 }

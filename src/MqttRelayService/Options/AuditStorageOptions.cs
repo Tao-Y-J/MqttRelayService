@@ -23,11 +23,11 @@
         /// <summary>
         /// 消息审计保留上限。
         /// </summary>
-        public int MessageRetentionCount { get; set; } = 20000;
+        public int MessageArchiveThreshold { get; set; } = 5000000;
 
         /// <summary>
         /// 客户端历史保留上限。
         /// </summary>
-        public int ClientHistoryRetentionCount { get; set; } = 5000;
+        public int ClientHistoryArchiveThreshold { get; set; } = 1000000;
     }
 }

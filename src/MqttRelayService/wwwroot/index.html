@@ -2247,10 +2247,7 @@
         // ==================== 辅助格式化函数 ====================
         function formatLatency(ms) {
             if (ms === undefined || ms === null) return '-';
-            if (ms === 0) return '0 ms';
-            if (ms < 0.1) return ms.toFixed(3) + ' ms';
-            if (ms < 1.0) return ms.toFixed(2) + ' ms';
-            return ms.toFixed(1) + ' ms';
+            return ms.toFixed(2) + ' ms';
         }
 
         function formatTime(isoString) {
@@ -2277,7 +2274,7 @@
             }
             return log.isSubscriberHit 
                 ? `<span class="badge badge-succeeded"><i class="fa-solid fa-circle-check"></i> 命中</span>` 
-                : `<span class="badge badge-deadletter"><i class="fa-solid fa-circle-xmark"></i> 未命中</span>`;
+                : `<span class="badge badge-routing"><i class="fa-solid fa-circle-minus"></i> 已转发未命中</span>`;
         }
 
         // ==================== 应用初始化 ====================
