@@ -1,4 +1,4 @@
-﻿namespace MqttRelayService.Models
+namespace MqttRelayService.Models
 {
     /// <summary>
     /// 内部转发消息
@@ -33,7 +33,7 @@
         /// <summary>
         /// 创建时间
         /// </summary>
-        public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+        public DateTime CreatedAt { get; set; } = DateTime.Now;
 
         /// <summary>
         /// 下次重试时间

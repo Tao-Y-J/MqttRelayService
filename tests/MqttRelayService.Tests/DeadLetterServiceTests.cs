@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Moq;
 using MqttRelayService.Models;
@@ -46,15 +46,15 @@ namespace MqttRelayService.Tests
                 Topic = "test/topic",
                 SourceClientId = "client-1",
                 PayloadBase64 = Convert.ToBase64String(new byte[] { 1, 2, 3 }),
-                FirstReceivedAt = DateTime.UtcNow,
-                LastFailedAt = DateTime.UtcNow,
+                FirstReceivedAt = DateTime.Now,
+                LastFailedAt = DateTime.Now,
                 FailureReason = "Test failure",
                 RetryCount = 3
             };
 
             await _service.WriteAsync(record);
 
-            var dateDir = Path.Combine(AppContext.BaseDirectory, _testDeadLetterPath, DateTime.UtcNow.ToString("yyyyMMdd"));
+            var dateDir = Path.Combine(AppContext.BaseDirectory, _testDeadLetterPath, DateTime.Now.ToString("yyyyMMdd"));
             var filePath = Path.Combine(dateDir, "msg-1.json");
 
             Assert.True(Directory.Exists(dateDir), "Date directory should be created");
@@ -77,8 +77,8 @@ namespace MqttRelayService.Tests
                 MessageId = "msg-2",
                 Topic = "test/topic",
                 SourceClientId = "client-1",
-                FirstReceivedAt = DateTime.UtcNow,
-                LastFailedAt = DateTime.UtcNow,
+                FirstReceivedAt = DateTime.Now,
+                LastFailedAt = DateTime.Now,
                 FailureReason = "Test failure",
                 RetryCount = 3
             };
@@ -108,8 +108,8 @@ namespace MqttRelayService.Tests
                     MessageId = "msg-write-fails",
                     Topic = "test/topic",
                     SourceClientId = "client-1",
-                    FirstReceivedAt = DateTime.UtcNow,
-                    LastFailedAt = DateTime.UtcNow,
+                    FirstReceivedAt = DateTime.Now,
+                    LastFailedAt = DateTime.Now,
                     FailureReason = "Test failure",
                     RetryCount = 3
                 };

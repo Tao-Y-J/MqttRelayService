@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using MqttRelayService.Services.Abstractions;
 
 namespace MqttRelayService.Workers
@@ -48,7 +48,7 @@ namespace MqttRelayService.Workers
 
                     var metrics = new
                     {
-                        Timestamp = DateTime.UtcNow.ToString("O"),
+                        Timestamp = DateTime.Now.ToString("O"),
                         QueueLength = currentCount,
                         PeakLength = currentPeak,
                         Capacity = _queue.Capacity

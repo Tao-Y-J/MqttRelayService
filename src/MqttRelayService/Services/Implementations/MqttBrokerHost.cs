@@ -1,4 +1,4 @@
-﻿using System.Buffers;
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Text;
 using Microsoft.Extensions.Options;
@@ -249,7 +249,7 @@ namespace MqttRelayService.Services.Implementations
                     QoS = (int)e.ApplicationMessage.QualityOfServiceLevel,
                     Retain = e.ApplicationMessage.Retain,
                     SourceClientId = e.ClientId,
-                    Timestamp = DateTime.UtcNow
+                    Timestamp = DateTime.Now
                 };
 
                 var forwardMessage = new ForwardMessage
@@ -374,8 +374,8 @@ namespace MqttRelayService.Services.Implementations
                     ClientId = e.ClientId,
                     ConnectionId = connectionId,
                     Username = e.UserName ?? string.Empty,
-                    ConnectedAt = DateTime.UtcNow,
-                    LastActivityAt = DateTime.UtcNow,
+                    ConnectedAt = DateTime.Now,
+                    LastActivityAt = DateTime.Now,
                     Status = ConnectionStatus.Connected
                 };
 

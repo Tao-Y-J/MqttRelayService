@@ -25,7 +25,7 @@ namespace MqttRelayService.Utilities
 
         // 令牌桶状态
         private double _tokens = 0;
-        private DateTime _lastRefill = DateTime.UtcNow;
+        private DateTime _lastRefill = DateTime.Now;
 
         public ThroughputController()
         {
@@ -133,7 +133,7 @@ namespace MqttRelayService.Utilities
             {
                 // 速率变化时，重置令牌桶，避免速率瞬间调整后的意外长等待
                 _tokens = _maxMessagesPerSecond;
-                _lastRefill = DateTime.UtcNow;
+                _lastRefill = DateTime.Now;
             }
         }
 
@@ -248,7 +248,7 @@ namespace MqttRelayService.Utilities
 
                 lock (_rateLock)
                 {
-                    var now = DateTime.UtcNow;
+                    var now = DateTime.Now;
                     var elapsed = (now - _lastRefill).TotalSeconds;
                     _lastRefill = now;
 

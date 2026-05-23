@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Options;
 using MqttRelayService.Models;
 using MqttRelayService.Options;
 using MqttRelayService.Services.Abstractions;
@@ -488,7 +488,7 @@ namespace MqttRelayService.Services.Implementations
             {
                 // 计算重试延迟
                 var delay = await _retryPolicy.GetDelayAsync(nextRetryCount, cancellationToken);
-                message.NextRetryAt = DateTime.UtcNow.Add(delay);
+                message.NextRetryAt = DateTime.Now.Add(delay);
 
                 _logger.LogWarning("消息 {MessageId} 第 {RetryCount} 次转发失败，{DelayMs}ms 后重试，原因：{Reason}",
                     message.RouteContext.MessageId, nextRetryCount, delay.TotalMilliseconds, reason);
@@ -783,7 +783,7 @@ namespace MqttRelayService.Services.Implementations
                 SourceClientId = message.RouteContext.SourceClientId,
                 PayloadBase64 = MessagePayloadFormatter.ToBase64(message.RouteContext.Payload),
                 FirstReceivedAt = message.CreatedAt,
-                LastFailedAt = DateTime.UtcNow,
+                LastFailedAt = DateTime.Now,
                 FailureReason = reason,
                 RetryCount = message.RetryCount
             };
@@ -818,7 +818,7 @@ namespace MqttRelayService.Services.Implementations
                     if (!_isStopping)
                     {
                         var delay = await _retryPolicy.GetDelayAsync(preserveAttempt, CancellationToken.None);
-                        message.NextRetryAt = DateTime.UtcNow.Add(delay);
+                        message.NextRetryAt = DateTime.Now.Add(delay);
 
                         _logger.LogWarning(
                             "消息 {MessageId} 第 {DeadLetterFailureCount} 次写入死信失败，{DelayMs}ms 后重新入队保留",

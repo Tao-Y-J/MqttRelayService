@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -89,8 +89,8 @@ namespace MqttRelayService.Tests
                 Status = "Queued",
                 LatencyMs = 0,
                 RetryCount = 0,
-                CreatedAt = DateTime.UtcNow,
-                UpdatedAt = DateTime.UtcNow
+                CreatedAt = DateTime.Now,
+                UpdatedAt = DateTime.Now
             };
 
             await _repository.RecordMessageAuditAsync(record);
@@ -103,7 +103,7 @@ namespace MqttRelayService.Tests
 
             record.Status = "Succeeded";
             record.LatencyMs = 25.5;
-            record.UpdatedAt = DateTime.UtcNow;
+            record.UpdatedAt = DateTime.Now;
 
             await _repository.RecordMessageAuditAsync(record);
             var (total2, items2) = await _repository.GetPagedMessagesAsync(1, 10);
@@ -126,7 +126,7 @@ namespace MqttRelayService.Tests
                 ConnectionId = "conn_x1",
                 Event = "Connected",
                 Details = "Subscribed to status/#",
-                Timestamp = DateTime.UtcNow
+                Timestamp = DateTime.Now
             };
             var record2 = new ClientConnectionHistoryRecord
             {
@@ -135,7 +135,7 @@ namespace MqttRelayService.Tests
                 ConnectionId = "conn_x2",
                 Event = "Disconnected",
                 Details = "Connection lost",
-                Timestamp = DateTime.UtcNow.AddSeconds(1)
+                Timestamp = DateTime.Now.AddSeconds(1)
             };
 
             await _repository.RecordClientConnectionHistoryAsync(record1);
@@ -169,8 +169,8 @@ namespace MqttRelayService.Tests
                     Qos = 0,
                     Retain = false,
                     Status = "Queued",
-                    CreatedAt = DateTime.UtcNow.AddMinutes(i),
-                    UpdatedAt = DateTime.UtcNow.AddMinutes(i)
+                    CreatedAt = DateTime.Now.AddMinutes(i),
+                    UpdatedAt = DateTime.Now.AddMinutes(i)
                 });
             }
 
@@ -181,7 +181,7 @@ namespace MqttRelayService.Tests
                     ClientId = $"client_{i:00}",
                     ConnectionId = $"conn_{i}",
                     Event = "Connected",
-                    Timestamp = DateTime.UtcNow.AddMinutes(i)
+                    Timestamp = DateTime.Now.AddMinutes(i)
                 });
             }
 
@@ -203,7 +203,7 @@ namespace MqttRelayService.Tests
         {
             await _repository.InitializeAsync();
 
-            var now = DateTime.UtcNow;
+            var now = DateTime.Now;
             await _repository.RecordMessageAuditAsync(new MessageAuditRecord
             {
                 MessageId = "sum_1",

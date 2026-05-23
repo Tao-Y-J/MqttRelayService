@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
@@ -71,7 +71,7 @@ namespace MqttRelayService.Services.Implementations.Decorators
                     QoS = qos,
                     Retain = retain,
                     SourceClientId = sourceClientId ?? string.Empty,
-                    Timestamp = DateTime.UtcNow
+                    Timestamp = DateTime.Now
                 };
 
                 // 记录转发成功或失败的性能指标

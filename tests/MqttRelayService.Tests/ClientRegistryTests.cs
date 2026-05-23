@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging;
 using Moq;
 using MqttRelayService.Models;
 using MqttRelayService.Options;
@@ -27,7 +27,7 @@ namespace MqttRelayService.Tests
             {
                 ClientId = "client-1",
                 Username = "user1",
-                ConnectedAt = DateTime.UtcNow,
+                ConnectedAt = DateTime.Now,
                 Status = ConnectionStatus.Connected
             };
 
@@ -44,7 +44,7 @@ namespace MqttRelayService.Tests
                 ClientId = "client-1",
                 ConnectionId = "conn-1",
                 Username = "user1",
-                ConnectedAt = DateTime.UtcNow,
+                ConnectedAt = DateTime.Now,
                 Status = ConnectionStatus.Connected
             };
 
@@ -62,7 +62,7 @@ namespace MqttRelayService.Tests
                 ClientId = "client-1",
                 ConnectionId = "conn-old",
                 Username = "user1",
-                ConnectedAt = DateTime.UtcNow,
+                ConnectedAt = DateTime.Now,
                 Status = ConnectionStatus.Connected
             };
             var newSession = new ClientSessionInfo
@@ -70,7 +70,7 @@ namespace MqttRelayService.Tests
                 ClientId = "client-1",
                 ConnectionId = "conn-new",
                 Username = "user1",
-                ConnectedAt = DateTime.UtcNow.AddSeconds(1),
+                ConnectedAt = DateTime.Now.AddSeconds(1),
                 Status = ConnectionStatus.Connected
             };
 
@@ -93,7 +93,7 @@ namespace MqttRelayService.Tests
                 ClientId = "client-1",
                 ConnectionId = "conn-1",
                 Username = "user1",
-                ConnectedAt = DateTime.UtcNow,
+                ConnectedAt = DateTime.Now,
                 Status = ConnectionStatus.Connected
             };
 
@@ -112,7 +112,7 @@ namespace MqttRelayService.Tests
             {
                 ClientId = "client-1",
                 Username = "user1",
-                ConnectedAt = DateTime.UtcNow,
+                ConnectedAt = DateTime.Now,
                 Status = ConnectionStatus.Connected
             };
 
@@ -130,7 +130,7 @@ namespace MqttRelayService.Tests
             {
                 ClientId = "client-1",
                 Username = "user1",
-                ConnectedAt = DateTime.UtcNow,
+                ConnectedAt = DateTime.Now,
                 Status = ConnectionStatus.Connected
             };
 
@@ -156,7 +156,7 @@ namespace MqttRelayService.Tests
                     {
                         ClientId = clientId,
                         Username = "user",
-                        ConnectedAt = DateTime.UtcNow,
+                        ConnectedAt = DateTime.Now,
                         Status = ConnectionStatus.Connected
                     };
                     await _registry.RegisterAsync(session);
@@ -175,7 +175,7 @@ namespace MqttRelayService.Tests
             {
                 ClientId = "client-1",
                 Username = "user1",
-                ConnectedAt = DateTime.UtcNow,
+                ConnectedAt = DateTime.Now,
                 Status = ConnectionStatus.Connected
             };
 

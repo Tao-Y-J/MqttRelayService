@@ -1,4 +1,4 @@
-﻿namespace MqttRelayService.Models
+namespace MqttRelayService.Models
 {
     /// <summary>
     /// 转发结果
@@ -23,6 +23,6 @@
         /// <summary>
         /// 转发时间戳
         /// </summary>
-        public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+        public DateTime Timestamp { get; set; } = DateTime.Now;
     }
 }

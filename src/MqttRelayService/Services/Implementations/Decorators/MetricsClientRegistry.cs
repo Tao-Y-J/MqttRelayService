@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -37,7 +37,7 @@ namespace MqttRelayService.Services.Implementations.Decorators
                 ConnectionId = session.ConnectionId,
                 Event = "Connected",
                 Details = $"客户端成功建立连接，会话状态为: {session.Status}",
-                Timestamp = DateTime.UtcNow
+                Timestamp = DateTime.Now
             };
 
             await _auditRepository.RecordClientConnectionHistoryAsync(record);
@@ -61,7 +61,7 @@ namespace MqttRelayService.Services.Implementations.Decorators
                 ConnectionId = actualConnId,
                 Event = "Disconnected",
                 Details = "连接已断开并注销会话",
-                Timestamp = DateTime.UtcNow
+                Timestamp = DateTime.Now
             };
 
             await _auditRepository.RecordClientConnectionHistoryAsync(record);
@@ -95,7 +95,7 @@ namespace MqttRelayService.Services.Implementations.Decorators
                 ConnectionId = connectionId,
                 Event = isSubscribed ? "Subscribed" : "Unsubscribed",
                 Details = $"主题: {topic}",
-                Timestamp = DateTime.UtcNow
+                Timestamp = DateTime.Now
             };
 
             await _auditRepository.RecordClientConnectionHistoryAsync(record);

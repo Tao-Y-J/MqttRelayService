@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -124,6 +124,20 @@ namespace MqttRelayService.Services.Implementations
             try
             {
                 await EnsureSchemaAsync();
+
+                // 启动时自动收敛：修复因上次服务异常关闭或重启导致的在途未决消息状态悬挂
+                var suspendedCount = await _db.Updateable<MessageAuditRecord>()
+                    .SetColumns(x => x.Status == "Failed")
+                    .SetColumns(x => x.ErrorMessage == "服务非正常关闭，未决在途消息已在内存队列中丢失")
+                    .SetColumns(x => x.UpdatedAt == DateTime.Now)
+                    .Where(x => x.Status == "Queued" || x.Status == "Routing" || x.Status == "Forwarding")
+                    .ExecuteCommandAsync();
+
+                if (suspendedCount > 0)
+                {
+                    _logger.LogWarning("系统启动自愈：已自动收敛 {Count} 条因非正常关闭残留的在途未决消息状态为 [Failed]", suspendedCount);
+                }
+
                 _logger.LogInformation("审计持久化初始化成功");
             }
             catch (Exception ex)

@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Microsoft.Extensions.Options;
 using MqttRelayService.Models;
 using MqttRelayService.Options;
@@ -34,7 +34,7 @@ namespace MqttRelayService.Services.Implementations
             try
             {
                 var deadLetterDir = Path.Combine(AppContext.BaseDirectory, _options.DeadLetterPath);
-                var dateDir = Path.Combine(deadLetterDir, DateTime.UtcNow.ToString("yyyyMMdd"));
+                var dateDir = Path.Combine(deadLetterDir, DateTime.Now.ToString("yyyyMMdd"));
 
                 if (!Directory.Exists(dateDir))
                 {

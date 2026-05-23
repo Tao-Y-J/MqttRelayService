@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -29,6 +29,11 @@ namespace MqttRelayService.Services.Implementations
         private readonly ReliabilityOptions _reliabilityOptions;
         private readonly IAuditRepository? _auditRepository;
         private readonly ILogger<MetricsService> _logger;
+        private readonly CancellationTokenSource _auditWriterCts = new();
+        private readonly ConcurrentDictionary<string, MessageAuditRecord> _pendingMessageAudits = new();
+        private readonly SemaphoreSlim _pendingAuditSignal = new(0);
+        private readonly Task? _auditWriterTask;
+        private int _auditFlushRequested;
 
         // 原子计数器
         private long _totalReceived;
@@ -58,7 +63,7 @@ namespace MqttRelayService.Services.Implementations
 
         // 定时快照采样器
         private readonly Timer _snapshotTimer;
-        private readonly DateTime _startTime = DateTime.UtcNow;
+        private readonly DateTime _startTime = DateTime.Now;
 
         /// <summary>
         /// 兼容旧版本的构造函数，主要用于测试
@@ -96,6 +101,11 @@ namespace MqttRelayService.Services.Implementations
 
             // 每2秒执行一次采样快照，用于前端实时波形图展示
             _snapshotTimer = new Timer(TakeSnapshot, null, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2));
+            if (_auditRepository != null)
+            {
+                _auditWriterTask = Task.Run(ProcessPendingAuditsAsync);
+            }
+
             _logger.LogInformation("主服务内置监控指标收集服务已启动");
         }
 
@@ -118,13 +128,12 @@ namespace MqttRelayService.Services.Implementations
                 Status = "Queued",
                 LatencyMs = 0.0,
                 RetryCount = message.RetryCount,
-                Timestamp = DateTime.UtcNow.ToString("o"),
+                Timestamp = DateTime.Now.ToString("o"),
                 ErrorMessage = string.Empty,
-                SystemTimestamp = DateTime.UtcNow
+                SystemTimestamp = DateTime.Now
             });
 
-            // 写入审计持久化（采用非阻塞 Task.Run）
-            var record = new MessageAuditRecord
+            EnqueueMessageAudit(new MessageAuditRecord
             {
                 MessageId = message.MessageId,
                 Topic = message.RouteContext.Topic,
@@ -137,12 +146,8 @@ namespace MqttRelayService.Services.Implementations
                 LatencyMs = 0.0,
                 RetryCount = message.RetryCount,
                 CreatedAt = message.RouteContext.Timestamp,
-                UpdatedAt = DateTime.UtcNow
-            };
-            if (_auditRepository != null)
-            {
-                _ = Task.Run(() => _auditRepository.RecordMessageAuditAsync(record));
-            }
+                UpdatedAt = DateTime.Now
+            });
         }
 
         /// <summary>
@@ -185,13 +190,12 @@ namespace MqttRelayService.Services.Implementations
                 Status = success ? "Succeeded" : "Failed",
                 LatencyMs = Math.Round(latencyMs, 2),
                 RetryCount = retryCount,
-                Timestamp = DateTime.UtcNow.ToString("o"),
+                Timestamp = DateTime.Now.ToString("o"),
                 ErrorMessage = success ? string.Empty : "转发注入失败，等待重试或移入死信",
-                SystemTimestamp = DateTime.UtcNow
+                SystemTimestamp = DateTime.Now
             });
 
-            // 写入审计持久化（采用非阻塞 Task.Run）
-            var record = new MessageAuditRecord
+            EnqueueMessageAudit(new MessageAuditRecord
             {
                 MessageId = context.MessageId,
                 Topic = context.Topic,
@@ -204,13 +208,9 @@ namespace MqttRelayService.Services.Implementations
                 LatencyMs = Math.Round(latencyMs, 2),
                 RetryCount = retryCount,
                 CreatedAt = context.Timestamp,
-                UpdatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.Now,
                 ErrorMessage = success ? null : "转发注入失败，等待重试或移入死信"
-            };
-            if (_auditRepository != null)
-            {
-                _ = Task.Run(() => _auditRepository.RecordMessageAuditAsync(record));
-            }
+            });
         }
 
         /// <summary>
@@ -244,13 +244,12 @@ namespace MqttRelayService.Services.Implementations
                 Status = "DeadLetter",
                 LatencyMs = Math.Round((record.LastFailedAt - record.FirstReceivedAt).TotalMilliseconds, 2),
                 RetryCount = record.RetryCount,
-                Timestamp = DateTime.UtcNow.ToString("o"),
+                Timestamp = DateTime.Now.ToString("o"),
                 ErrorMessage = record.FailureReason ?? "达到重试上限",
-                SystemTimestamp = DateTime.UtcNow
+                SystemTimestamp = DateTime.Now
             });
 
-            // 写入审计持久化（采用非阻塞 Task.Run）
-            var auditRecord = new MessageAuditRecord
+            EnqueueMessageAudit(new MessageAuditRecord
             {
                 MessageId = record.MessageId,
                 Topic = record.Topic,
@@ -263,12 +262,77 @@ namespace MqttRelayService.Services.Implementations
                 LatencyMs = Math.Round((record.LastFailedAt - record.FirstReceivedAt).TotalMilliseconds, 2),
                 RetryCount = record.RetryCount,
                 CreatedAt = record.FirstReceivedAt,
-                UpdatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.Now,
                 ErrorMessage = record.FailureReason ?? "达到重试上限"
-            };
-            if (_auditRepository != null)
+            });
+        }
+
+        private void EnqueueMessageAudit(MessageAuditRecord record)
+        {
+            if (_auditRepository == null || string.IsNullOrEmpty(record.MessageId))
             {
-                _ = Task.Run(() => _auditRepository.RecordMessageAuditAsync(auditRecord));
+                return;
+            }
+
+            _pendingMessageAudits[record.MessageId] = record;
+
+            if (Interlocked.Exchange(ref _auditFlushRequested, 1) == 0)
+            {
+                _pendingAuditSignal.Release();
+            }
+        }
+
+        private async Task ProcessPendingAuditsAsync()
+        {
+            while (true)
+            {
+                try
+                {
+                    await _pendingAuditSignal.WaitAsync(_auditWriterCts.Token);
+                }
+                catch (OperationCanceledException) when (_auditWriterCts.IsCancellationRequested)
+                {
+                    break;
+                }
+
+                Interlocked.Exchange(ref _auditFlushRequested, 0);
+                await FlushPendingAuditsAsync();
+            }
+
+            await FlushPendingAuditsAsync();
+        }
+
+        private async Task FlushPendingAuditsAsync()
+        {
+            if (_auditRepository == null)
+            {
+                return;
+            }
+
+            while (!_pendingMessageAudits.IsEmpty)
+            {
+                var snapshot = _pendingMessageAudits.ToArray();
+                if (snapshot.Length == 0)
+                {
+                    break;
+                }
+
+                foreach (var pair in snapshot)
+                {
+                    if (!_pendingMessageAudits.TryRemove(pair.Key, out var latestRecord))
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        await _auditRepository.RecordMessageAuditAsync(latestRecord);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "后台写入消息 {MessageId} 审计记录时发生异常", latestRecord.MessageId);
+                    }
+                }
             }
         }
 
@@ -393,7 +457,7 @@ namespace MqttRelayService.Services.Implementations
 
                 var snapshot = new
                 {
-                    Time = DateTime.UtcNow.ToString("HH:mm:ss"),
+                    Time = DateTime.Now.ToString("HH:mm:ss"),
                     Received = receivedRate,
                     Succeeded = succeededRate,
                     Failed = failedRate,
@@ -425,7 +489,7 @@ namespace MqttRelayService.Services.Implementations
             var process = Process.GetCurrentProcess();
 
             // Uptime 格式化
-            var uptime = DateTime.UtcNow - _startTime;
+            var uptime = DateTime.Now - _startTime;
             var uptimeString = $"{(int)uptime.TotalDays}天 {uptime.Hours:D2}:{uptime.Minutes:D2}:{uptime.Seconds:D2}";
 
             // 提取在线客户端列表
@@ -453,30 +517,6 @@ namespace MqttRelayService.Services.Implementations
             var totalDeadLetter = Interlocked.Read(ref _totalDeadLetter);
             IEnumerable<object> logs = _messageLogs.Values.OrderByDescending(x => x.SystemTimestamp).Cast<object>().ToList();
 
-            if (_auditRepository != null)
-            {
-                var auditSummary = await _auditRepository.GetDashboardMessageSummaryAsync(100);
-                totalReceived = auditSummary.TotalMessages;
-                totalSucceeded = auditSummary.TotalSucceeded;
-                totalFailed = auditSummary.TotalFailed;
-                totalDeadLetter = auditSummary.TotalDeadLetter;
-                logs = auditSummary.RecentItems.Select(record => new
-                {
-                    record.MessageId,
-                    record.Topic,
-                    record.SourceClientId,
-                    record.PayloadSize,
-                    record.Payload,
-                    Qos = record.Qos,
-                    Retain = record.Retain,
-                    record.Status,
-                    record.LatencyMs,
-                    record.RetryCount,
-                    Timestamp = record.CreatedAt.ToString("o"),
-                    record.ErrorMessage
-                }).Cast<object>().ToList();
-            }
-
             return new
             {
                 System = new
@@ -488,7 +528,7 @@ namespace MqttRelayService.Services.Implementations
                     DotNetVersion = RuntimeInformation.FrameworkDescription,
                     CpuThreads = Environment.ProcessorCount,
                     MemoryUsageMb = Math.Round(process.WorkingSet64 / 1024.0 / 1024.0, 2),
-                    Timestamp = DateTime.UtcNow.ToString("o")
+                    Timestamp = DateTime.Now.ToString("o")
                 },
                 Counters = new
                 {
@@ -528,6 +568,21 @@ namespace MqttRelayService.Services.Implementations
         public void Dispose()
         {
             _snapshotTimer.Dispose();
+            _auditWriterCts.Cancel();
+            _pendingAuditSignal.Release();
+
+            try
+            {
+                _auditWriterTask?.GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            finally
+            {
+                _auditWriterCts.Dispose();
+                _pendingAuditSignal.Dispose();
+            }
         }
     }
 
@@ -595,6 +650,6 @@ namespace MqttRelayService.Services.Implementations
         /// <summary>
         /// 系统级时间戳，用于高效率内存排序
         /// </summary>
-        public DateTime SystemTimestamp { get; set; } = DateTime.UtcNow;
+        public DateTime SystemTimestamp { get; set; } = DateTime.Now;
     }
 }

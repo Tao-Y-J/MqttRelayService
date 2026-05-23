@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using MqttRelayService.Models;
 using MqttRelayService.Services.Abstractions;
 
@@ -144,7 +144,7 @@ namespace MqttRelayService.Services.Implementations
             {
                 lock (session)
                 {
-                    session.LastActivityAt = DateTime.UtcNow;
+                    session.LastActivityAt = DateTime.Now;
                 }
             }
 

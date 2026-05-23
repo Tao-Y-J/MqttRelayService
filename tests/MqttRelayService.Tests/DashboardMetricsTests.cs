@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -69,7 +69,7 @@ namespace MqttRelayService.Tests
                     QoS = 1,
                     Retain = false,
                     SourceClientId = "client_1",
-                    Timestamp = DateTime.UtcNow
+                    Timestamp = DateTime.Now
                 }
             };
 
@@ -111,7 +111,7 @@ namespace MqttRelayService.Tests
                 QoS = 0,
                 Retain = true,
                 SourceClientId = "client_2",
-                Timestamp = DateTime.UtcNow
+                Timestamp = DateTime.Now
             };
 
             // Act
@@ -159,7 +159,7 @@ namespace MqttRelayService.Tests
                     QoS = 1,
                     Retain = false,
                     SourceClientId = "client_mut",
-                    Timestamp = DateTime.UtcNow
+                    Timestamp = DateTime.Now
                 }
             };
 
@@ -202,8 +202,8 @@ namespace MqttRelayService.Tests
                 Topic = "test/dlq",
                 PayloadBase64 = "SGVsbG8=",
                 FailureReason = "Auth failed",
-                FirstReceivedAt = DateTime.UtcNow.AddSeconds(-10),
-                LastFailedAt = DateTime.UtcNow,
+                FirstReceivedAt = DateTime.Now.AddSeconds(-10),
+                LastFailedAt = DateTime.Now,
                 RetryCount = 3
             };
 
@@ -225,9 +225,9 @@ namespace MqttRelayService.Tests
         }
 
         [Fact]
-        public async Task MetricsService_GetDashboardDataAsync_WithAuditRepository_ShouldPreferAuditAlignedSummary()
+        public async Task MetricsService_GetDashboardDataAsync_WithAuditRepository_ShouldStillUseLiveInMemoryCounters()
         {
-            var now = DateTime.UtcNow;
+            var now = DateTime.Now;
             _mockAuditRepository
                 .Setup(r => r.GetDashboardMessageSummaryAsync(100))
                 .ReturnsAsync((
@@ -263,19 +263,90 @@ namespace MqttRelayService.Tests
                 _mockAuditRepository.Object,
                 _mockLogger.Object);
 
+            var message = new ForwardMessage
+            {
+                MessageId = "live_msg_1",
+                RouteContext = new RouteContext
+                {
+                    MessageId = "live_msg_1",
+                    Topic = "live/topic",
+                    Payload = new byte[] { 1, 2, 3 },
+                    QoS = 1,
+                    Retain = false,
+                    SourceClientId = "live_client",
+                    Timestamp = now
+                }
+            };
+
+            metricsService.RecordReceived(message);
+            metricsService.RecordForwarded(message.RouteContext, success: true, retryCount: 0, latencyMs: 8.8);
             var result = await metricsService.GetDashboardDataAsync();
 
             dynamic data = result;
-            Assert.Equal(12L, (long)data.Counters.TotalReceived);
-            Assert.Equal(8L, (long)data.Counters.TotalSucceeded);
-            Assert.Equal(3L, (long)data.Counters.TotalFailed);
-            Assert.Equal(1L, (long)data.Counters.TotalDeadLetter);
+            Assert.Equal(1L, (long)data.Counters.TotalReceived);
+            Assert.Equal(1L, (long)data.Counters.TotalSucceeded);
+            Assert.Equal(0L, (long)data.Counters.TotalFailed);
+            Assert.Equal(0L, (long)data.Counters.TotalDeadLetter);
 
             var logs = (List<object>)data.Logs;
             Assert.Single(logs);
             dynamic log = logs[0];
-            Assert.Equal("audit_1", (string)log.MessageId);
+            Assert.Equal("live_msg_1", (string)log.MessageId);
             Assert.Equal("Succeeded", (string)log.Status);
+        }
+
+        [Fact]
+        public async Task MetricsService_RecordForwarded_WithAuditRepository_ShouldPersistLatestStateAsynchronously()
+        {
+            var now = DateTime.Now;
+            var persistedSucceeded = new TaskCompletionSource<MessageAuditRecord>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            _mockAuditRepository
+                .Setup(r => r.RecordMessageAuditAsync(It.IsAny<MessageAuditRecord>()))
+                .Returns<MessageAuditRecord>(record =>
+                {
+                    if (record.MessageId == "async_msg_1" && record.Status == "Succeeded")
+                    {
+                        persistedSucceeded.TrySetResult(record);
+                    }
+
+                    return Task.CompletedTask;
+                });
+
+            using var metricsService = new MetricsService(
+                _queue,
+                _mockClientRegistry.Object,
+                _serviceOptions,
+                _mqttOptions,
+                _reliabilityOptions,
+                _mockAuditRepository.Object,
+                _mockLogger.Object);
+
+            var message = new ForwardMessage
+            {
+                MessageId = "async_msg_1",
+                RouteContext = new RouteContext
+                {
+                    MessageId = "async_msg_1",
+                    Topic = "async/topic",
+                    Payload = new byte[] { 9, 9, 9 },
+                    QoS = 1,
+                    Retain = false,
+                    SourceClientId = "async_client",
+                    Timestamp = now
+                }
+            };
+
+            metricsService.RecordReceived(message);
+            metricsService.RecordForwarded(message.RouteContext, success: true, retryCount: 2, latencyMs: 18.6);
+
+            var completed = await Task.WhenAny(persistedSucceeded.Task, Task.Delay(TimeSpan.FromSeconds(2)));
+            Assert.Same(persistedSucceeded.Task, completed);
+
+            var persisted = await persistedSucceeded.Task;
+            Assert.Equal("Succeeded", persisted.Status);
+            Assert.Equal(2, persisted.RetryCount);
+            Assert.Equal("async_msg_1", persisted.MessageId);
         }
 
         [Fact]
