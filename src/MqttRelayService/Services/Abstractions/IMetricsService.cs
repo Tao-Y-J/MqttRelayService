@@ -1,4 +1,4 @@
-using System.Threading.Tasks;
+﻿using System.Threading.Tasks;
 using MqttRelayService.Models;
 
 namespace MqttRelayService.Services.Abstractions
@@ -12,7 +12,7 @@ namespace MqttRelayService.Services.Abstractions
         /// 记录一条消息成功入队
         /// </summary>
         /// <param name="message">入队的消息实例</param>
-        void RecordReceived(ForwardMessage message);
+        void RecordReceived(ForwardMessage message, bool isFirstReceipt = true);
 
         /// <summary>
         /// 记录由于队列满载导致的消息被丢弃事件

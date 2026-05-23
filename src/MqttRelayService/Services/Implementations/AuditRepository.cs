@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -178,6 +178,7 @@ namespace MqttRelayService.Services.Implementations
             catch (Exception ex)
             {
                 _logger.LogError(ex, "写入消息 {MessageId} 审计记录发生异常", record.MessageId);
+                throw;
             }
             finally
             {
@@ -217,6 +218,7 @@ namespace MqttRelayService.Services.Implementations
             catch (Exception ex)
             {
                 _logger.LogError(ex, "批量写入 {Count} 条消息审计记录发生异常", records.Count);
+                throw;
             }
             finally
             {

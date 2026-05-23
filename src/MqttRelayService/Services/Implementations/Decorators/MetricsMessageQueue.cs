@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using MqttRelayService.Models;
@@ -31,10 +31,11 @@ namespace MqttRelayService.Services.Implementations.Decorators
 
         public async Task<bool> EnqueueAsync(ForwardMessage message, CancellationToken cancellationToken = default)
         {
+            var isFirstReceipt = message.Status == MessageProcessStatus.Received;
             var success = await _inner.EnqueueAsync(message, cancellationToken);
             if (success)
             {
-                _metrics.RecordReceived(message);
+                _metrics.RecordReceived(message, isFirstReceipt);
             }
             else
             {

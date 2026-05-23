@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -112,11 +112,9 @@ namespace MqttRelayService.Services.Implementations
         /// <summary>
         /// 记录一条消息成功入队
         /// </summary>
-        public void RecordReceived(ForwardMessage message)
+        public void RecordReceived(ForwardMessage message, bool isFirstReceipt = true)
         {
-            Interlocked.Increment(ref _totalReceived);
             CachePayload(message.MessageId, message.RouteContext.Payload);
-            var isFirstReceipt = message.Status == MessageProcessStatus.Received;
 
             AddOrUpdateLog(new MessageLogEntry
             {
@@ -139,6 +137,8 @@ namespace MqttRelayService.Services.Implementations
             {
                 return;
             }
+
+            Interlocked.Increment(ref _totalReceived);
 
             EnqueueMessageAudit(new MessageAuditRecord
             {
@@ -338,9 +338,6 @@ namespace MqttRelayService.Services.Implementations
                 return;
             }
 
-            const int batchSize = 100;
-            var batch = new List<MessageAuditRecord>(batchSize);
-
             while (!_pendingMessageAudits.IsEmpty)
             {
                 var snapshot = _pendingMessageAudits.ToArray();
@@ -348,6 +345,9 @@ namespace MqttRelayService.Services.Implementations
                 {
                     break;
                 }
+
+                const int batchSize = 100;
+                var batch = new List<MessageAuditRecord>(batchSize);
 
                 foreach (var pair in snapshot)
                 {
@@ -360,33 +360,40 @@ namespace MqttRelayService.Services.Implementations
 
                     if (batch.Count >= batchSize)
                     {
-                        try
-                        {
-                            await _auditRepository.RecordMessageAuditsAsync(batch);
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogError(ex, "后台批量写入 {Count} 条消息审计记录时发生异常", batch.Count);
-                        }
+                        await WriteAuditBatchOrRequeueAsync(batch);
                         batch.Clear();
                     }
                 }
 
                 if (batch.Count > 0)
                 {
-                    try
-                    {
-                        await _auditRepository.RecordMessageAuditsAsync(batch);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "后台批量写入 {Count} 条消息审计记录时发生异常", batch.Count);
-                    }
+                    await WriteAuditBatchOrRequeueAsync(batch);
                     batch.Clear();
                 }
 
                 // 每次刷完一轮后，进行短暂的 Yield 释放 CPU 占用，防止高吞吐下完全堵死其他线程的数据库查询
                 await Task.Yield();
+            }
+        }
+
+        private async Task WriteAuditBatchOrRequeueAsync(IReadOnlyCollection<MessageAuditRecord> batch)
+        {
+            if (_auditRepository == null || batch.Count == 0)
+            {
+                return;
+            }
+
+            try
+            {
+                await _auditRepository.RecordMessageAuditsAsync(batch.ToList());
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "后台批量写入 {Count} 条消息审计记录时发生异常，已重新并入待写队列", batch.Count);
+                foreach (var record in batch)
+                {
+                    EnqueueMessageAudit(record);
+                }
             }
         }
 
@@ -624,16 +631,6 @@ namespace MqttRelayService.Services.Implementations
             var totalDeadLetter = Interlocked.Read(ref _totalDeadLetter);
             var totalPending = _queue.Count;
             IEnumerable<object> logs = _messageLogs.Values.OrderByDescending(x => x.SystemTimestamp).Cast<object>().ToList();
-
-            if (_auditRepository != null)
-            {
-                var summary = await _auditRepository.GetDashboardMessageSummaryAsync(MaxLogCount);
-                totalReceived = summary.TotalMessages;
-                totalPending = summary.TotalPending;
-                totalSucceeded = summary.TotalSucceeded;
-                totalFailed = summary.TotalFailed;
-                totalDeadLetter = summary.TotalDeadLetter;
-            }
 
             return new
             {
