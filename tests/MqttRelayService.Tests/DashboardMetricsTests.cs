@@ -608,6 +608,58 @@ namespace MqttRelayService.Tests
         }
 
         [Fact]
+        public async Task MetricsMessageQueue_EnqueueAsync_BinaryPayload_ShouldPersistSqliteSafePayloadText()
+        {
+            var persistedQueued = new TaskCompletionSource<MessageAuditRecord>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            _mockAuditRepository
+                .Setup(r => r.RecordMessageAuditsAsync(It.IsAny<IReadOnlyList<MessageAuditRecord>>()))
+                .Callback<IReadOnlyList<MessageAuditRecord>>(records =>
+                {
+                    var record = records.SingleOrDefault(r => r.MessageId == "binary_payload_msg" && r.Status == "Queued");
+                    if (record != null)
+                    {
+                        persistedQueued.TrySetResult(record);
+                    }
+                })
+                .Returns(Task.CompletedTask);
+
+            using var metricsService = new MetricsService(
+                _queue,
+                _mockClientRegistry.Object,
+                _serviceOptions,
+                _mqttOptions,
+                _reliabilityOptions,
+                _mockAuditRepository.Object,
+                _mockLogger.Object);
+
+            var queue = new MetricsMessageQueue(_queue, metricsService);
+            var message = new ForwardMessage
+            {
+                MessageId = "binary_payload_msg",
+                RouteContext = new RouteContext
+                {
+                    MessageId = "binary_payload_msg",
+                    Topic = "binary/topic",
+                    Payload = new byte[] { 0x18, 0xFF, 0x1F, 0x00, 0x41, 0x42, 0x43 },
+                    QoS = 0,
+                    Retain = false,
+                    SourceClientId = "binary_client",
+                    Timestamp = DateTime.Now
+                }
+            };
+
+            Assert.True(await queue.EnqueueAsync(message));
+
+            var completed = await Task.WhenAny(persistedQueued.Task, Task.Delay(TimeSpan.FromSeconds(2)));
+            Assert.Same(persistedQueued.Task, completed);
+
+            var persisted = await persistedQueued.Task;
+            Assert.StartsWith("[二进制载荷，大小:", persisted.Payload);
+            Assert.Contains("HEX:", persisted.Payload);
+        }
+
+        [Fact]
         public async Task MetricsMessageQueue_EnqueueAsync_ShouldInterceptAndRecordMetrics()
         {
             // Arrange

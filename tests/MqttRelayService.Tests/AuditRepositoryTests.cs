@@ -196,6 +196,39 @@ namespace MqttRelayService.Tests
         }
 
         [Fact]
+        public async Task RecordMessageAuditsAsync_ShouldPersistLargeSqliteBatchWithoutDroppingRows()
+        {
+            await _repository.InitializeAsync();
+            var now = DateTime.Now;
+            var records = Enumerable.Range(1, 600)
+                .Select(i => new MessageAuditRecord
+                {
+                    MessageId = $"bulk_{i:D4}",
+                    Topic = $"topic/{i % 8}",
+                    SourceClientId = $"client_{i % 16}",
+                    PayloadSize = 64,
+                    Payload = "payload",
+                    Qos = 0,
+                    Retain = false,
+                    Status = "Succeeded",
+                    LatencyMs = i,
+                    RetryCount = 0,
+                    CreatedAt = now.AddMilliseconds(i),
+                    UpdatedAt = now.AddMilliseconds(i)
+                })
+                .ToList();
+
+            await _repository.RecordMessageAuditsAsync(records);
+
+            var summary = await _repository.GetDashboardMessageSummaryAsync(10);
+            Assert.Equal(600, summary.TotalMessages);
+            Assert.Equal(600, summary.TotalSucceeded);
+            Assert.Equal(0, summary.TotalPending);
+            Assert.Equal(0, summary.TotalFailed);
+            Assert.Equal(0, summary.TotalDeadLetter);
+        }
+
+        [Fact]
         public async Task RecordClientConnectionHistoryAsync_ShouldSaveAndFilterCorrectly()
         {
             await _repository.InitializeAsync();

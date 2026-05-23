@@ -18,6 +18,10 @@ namespace MqttRelayService.Services.Implementations
     /// </summary>
     public class AuditRepository : IAuditRepository
     {
+        private const int SqliteExistsQueryBatchSize = 500;
+        private const int SqliteWriteBatchSize = 50;
+        private const int DefaultExistsQueryBatchSize = 2000;
+        private const int DefaultWriteBatchSize = 200;
         private readonly AuditStorageOptions _options;
         private readonly ILogger<AuditRepository> _logger;
         private readonly SemaphoreSlim _writeLock = new(1, 1);
@@ -220,12 +224,20 @@ namespace MqttRelayService.Services.Implementations
                 return;
             }
 
-            var existingIds = new HashSet<string>(
-                await _db.Queryable<MessageAuditRecord>()
-                    .Where(x => messageIds.Contains(x.MessageId))
+            var existingIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var idBatch in Chunk(messageIds, GetExistsQueryBatchSize()))
+            {
+                var batchIds = idBatch.ToList();
+                var foundIds = await _db.Queryable<MessageAuditRecord>()
+                    .Where(x => batchIds.Contains(x.MessageId))
                     .Select(x => x.MessageId)
-                    .ToListAsync(),
-                StringComparer.Ordinal);
+                    .ToListAsync();
+
+                foreach (var existingId in foundIds)
+                {
+                    existingIds.Add(existingId);
+                }
+            }
 
             var toInsert = latestRecords
                 .Where(x => !existingIds.Contains(x.MessageId))
@@ -235,20 +247,77 @@ namespace MqttRelayService.Services.Implementations
                 .Where(x => existingIds.Contains(x.MessageId))
                 .ToList();
 
-            await _db.UseTranAsync(async () =>
+            var writeBatchSize = GetWriteBatchSize();
+            var tranResult = await _db.UseTranAsync(async () =>
             {
-                if (toInsert.Count > 0)
+                foreach (var insertBatch in Chunk(toInsert, writeBatchSize))
                 {
-                    await _db.Insertable(toInsert).ExecuteCommandAsync();
+                    var batchItems = insertBatch.ToList();
+                    if (batchItems.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    await _db.Insertable(batchItems).ExecuteCommandAsync();
                 }
 
-                if (toUpdate.Count > 0)
+                foreach (var updateBatch in Chunk(toUpdate, writeBatchSize))
                 {
-                    await _db.Updateable(toUpdate)
+                    var batchItems = updateBatch.ToList();
+                    if (batchItems.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    await _db.Updateable(batchItems)
                         .IgnoreColumns(x => new { x.CreatedAt })
                         .ExecuteCommandAsync();
                 }
             });
+
+            if (!tranResult.IsSuccess)
+            {
+                throw tranResult.ErrorException ?? new InvalidOperationException("批量 Upsert 消息审计记录事务失败");
+            }
+        }
+
+        private int GetExistsQueryBatchSize()
+        {
+            return ParseDbType(_options.Provider) == DbType.Sqlite
+                ? SqliteExistsQueryBatchSize
+                : DefaultExistsQueryBatchSize;
+        }
+
+        private int GetWriteBatchSize()
+        {
+            return ParseDbType(_options.Provider) == DbType.Sqlite
+                ? SqliteWriteBatchSize
+                : DefaultWriteBatchSize;
+        }
+
+        private static IEnumerable<List<T>> Chunk<T>(IReadOnlyList<T> source, int batchSize)
+        {
+            if (source.Count == 0)
+            {
+                yield break;
+            }
+
+            if (batchSize <= 0)
+            {
+                batchSize = source.Count;
+            }
+
+            for (var i = 0; i < source.Count; i += batchSize)
+            {
+                var count = Math.Min(batchSize, source.Count - i);
+                var batch = new List<T>(count);
+                for (var j = 0; j < count; j++)
+                {
+                    batch.Add(source[i + j]);
+                }
+
+                yield return batch;
+            }
         }
 
         public async Task RecordClientConnectionHistoryAsync(ClientConnectionHistoryRecord record)

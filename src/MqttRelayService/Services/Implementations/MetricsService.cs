@@ -443,33 +443,61 @@ namespace MqttRelayService.Services.Implementations
                 return;
             }
 
+            _payloads[messageId] = FormatPayloadForDisplay(payload);
+            _payloadKeys.Enqueue(messageId);
+
+            while (_payloadKeys.Count > MaxLogCount)
+            {
+                if (_payloadKeys.TryDequeue(out var oldKey))
+                {
+                    _payloads.TryRemove(oldKey, out _);
+                }
+            }
+        }
+
+        private static string FormatPayloadForDisplay(byte[] payload)
+        {
+            const int maxPreviewBytes = 8192;
+
+            if (payload.Length == 0)
+            {
+                return "[空载荷]";
+            }
+
+            var previewLength = Math.Min(payload.Length, maxPreviewBytes);
+            var previewBytes = payload.AsSpan(0, previewLength).ToArray();
+
+            if (TryFormatUtf8Preview(previewBytes, payload.Length > maxPreviewBytes, out var utf8Preview))
+            {
+                return utf8Preview;
+            }
+
+            var hexPreview = Convert.ToHexString(previewBytes);
+            return payload.Length > maxPreviewBytes
+                ? $"[二进制载荷，大小: {payload.Length} 字节，前 {maxPreviewBytes} 字节 HEX: {hexPreview}...]"
+                : $"[二进制载荷，大小: {payload.Length} 字节，HEX: {hexPreview}]";
+        }
+
+        private static bool TryFormatUtf8Preview(byte[] previewBytes, bool truncated, out string payloadText)
+        {
+            payloadText = string.Empty;
+
             try
             {
-                // 限制缓存长度，防止超大消息导致内容爆炸
-                string payloadText;
-                if (payload.Length > 8192)
+                var utf8Text = System.Text.Encoding.UTF8.GetString(previewBytes);
+                if (utf8Text.Any(ch => char.IsControl(ch) && ch != '\r' && ch != '\n' && ch != '\t'))
                 {
-                    payloadText = $"[载荷超过8KB，已截断] {System.Text.Encoding.UTF8.GetString(payload, 0, 8192)}...";
-                }
-                else
-                {
-                    payloadText = System.Text.Encoding.UTF8.GetString(payload);
+                    return false;
                 }
 
-                _payloads[messageId] = payloadText;
-                _payloadKeys.Enqueue(messageId);
-
-                while (_payloadKeys.Count > MaxLogCount)
-                {
-                    if (_payloadKeys.TryDequeue(out var oldKey))
-                    {
-                        _payloads.TryRemove(oldKey, out _);
-                    }
-                }
+                payloadText = truncated
+                    ? $"[载荷超过8KB，已截断] {utf8Text}..."
+                    : utf8Text;
+                return true;
             }
             catch
             {
-                _payloads[messageId] = $"[载荷无法解析为 UTF-8 文本，大小: {payload.Length} 字节]";
+                return false;
             }
         }
 
