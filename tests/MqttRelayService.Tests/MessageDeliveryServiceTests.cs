@@ -7,6 +7,7 @@ using MqttRelayService.Models;
 using MqttRelayService.Options;
 using MqttRelayService.Services.Abstractions;
 using MqttRelayService.Services.Implementations;
+using MqttRelayService.Utilities;
 using Xunit;
 
 namespace MqttRelayService.Tests
@@ -21,6 +22,7 @@ namespace MqttRelayService.Tests
         private readonly Mock<IMqttBrokerHost> _brokerHostMock;
         private readonly Mock<IDeadLetterService> _deadLetterMock;
         private readonly Mock<IRetryPolicyProvider> _retryPolicyMock;
+        private readonly Mock<IMetricsService> _metricsMock;
         private readonly MessageDeliveryService _service;
 
         public MessageDeliveryServiceTests()
@@ -30,6 +32,7 @@ namespace MqttRelayService.Tests
             _brokerHostMock = new Mock<IMqttBrokerHost>();
             _deadLetterMock = new Mock<IDeadLetterService>();
             _retryPolicyMock = new Mock<IRetryPolicyProvider>();
+            _metricsMock = new Mock<IMetricsService>();
 
             var options = Microsoft.Extensions.Options.Options.Create(new ReliabilityOptions
             {
@@ -52,6 +55,8 @@ namespace MqttRelayService.Tests
                 _deadLetterMock.Object,
                 _retryPolicyMock.Object,
                 options,
+                new ThroughputController(),
+                _metricsMock.Object,
                 loggerMock.Object);
         }
 
@@ -81,6 +86,33 @@ namespace MqttRelayService.Tests
                 It.Is<string>(s => s == "client-1"),
                 It.Is<bool>(retain => !retain),
                 It.IsAny<CancellationToken>()),
+                Times.Once);
+        }
+
+        [Fact]
+        public async Task ProcessMessageAsync_Success_RecordsProcessingLatencyFromReceiveToBrokerPublish()
+        {
+            var message = CreateTestMessage();
+            message.RouteContext.Timestamp = DateTime.Now.AddMilliseconds(-800);
+            var targets = new List<ForwardResult>
+            {
+                new() { TargetClientId = "client-2", Success = true }
+            };
+
+            _routerMock.Setup(r => r.RouteAsync(It.IsAny<RouteContext>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(targets);
+            _brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(true);
+
+            var method = typeof(MessageDeliveryService).GetMethod("ProcessMessageAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            await (Task)method!.Invoke(_service, new object[] { message, CancellationToken.None })!;
+
+            _metricsMock.Verify(m => m.RecordForwarded(
+                It.Is<RouteContext>(ctx => ctx.MessageId == message.RouteContext.MessageId),
+                true,
+                0,
+                It.Is<double>(latency => latency >= 500),
+                true),
                 Times.Once);
         }
 

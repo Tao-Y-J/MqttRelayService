@@ -21,6 +21,7 @@ namespace MqttRelayService.Services.Implementations
         private readonly IRetryPolicyProvider _retryPolicy;
         private readonly ReliabilityOptions _options;
         private readonly ThroughputController _throughputController;
+        private readonly IMetricsService? _metrics;
         private readonly ILogger<MessageDeliveryService> _logger;
 
         private readonly object _lifecycleLock = new();
@@ -41,7 +42,7 @@ namespace MqttRelayService.Services.Implementations
             IRetryPolicyProvider retryPolicy,
             IOptions<ReliabilityOptions> options,
             ILogger<MessageDeliveryService> logger)
-            : this(queue, router, brokerHost, deadLetterService, retryPolicy, options, new ThroughputController(), logger)
+            : this(queue, router, brokerHost, deadLetterService, retryPolicy, options, new ThroughputController(), null, logger)
         {
         }
 
@@ -54,6 +55,20 @@ namespace MqttRelayService.Services.Implementations
             IOptions<ReliabilityOptions> options,
             ThroughputController throughputController,
             ILogger<MessageDeliveryService> logger)
+            : this(queue, router, brokerHost, deadLetterService, retryPolicy, options, throughputController, null, logger)
+        {
+        }
+
+        public MessageDeliveryService(
+            IMessageQueue queue,
+            IMessageRouter router,
+            IMqttBrokerHost brokerHost,
+            IDeadLetterService deadLetterService,
+            IRetryPolicyProvider retryPolicy,
+            IOptions<ReliabilityOptions> options,
+            ThroughputController throughputController,
+            IMetricsService? metrics,
+            ILogger<MessageDeliveryService> logger)
         {
             _queue = queue;
             _router = router;
@@ -62,6 +77,7 @@ namespace MqttRelayService.Services.Implementations
             _retryPolicy = retryPolicy;
             _options = options.Value;
             _throughputController = throughputController;
+            _metrics = metrics;
             _logger = logger;
 
             // 订阅动态并发度变更事件，以便在运行期上调并发度时动态增物理消费者线程
@@ -408,6 +424,7 @@ namespace MqttRelayService.Services.Implementations
         {
             cancellationToken.ThrowIfCancellationRequested();
             var context = message.RouteContext;
+            var success = false;
 
             try
             {
@@ -418,11 +435,9 @@ namespace MqttRelayService.Services.Implementations
                 MessageContext.CurrentFirstReceivedAt.Value = context.Timestamp;
                 MessageContext.CurrentRetryCount.Value = message.RetryCount;
                 MessageContext.CurrentIsSubscriberHit.Value = isSubscriberHit;
-                Console.WriteLine($"[DEBUG-MSG] MessageDeliveryService.TryForwardAsync: Set CurrentMessageId.Value = '{MessageContext.CurrentMessageId.Value}' for context.MessageId = '{context.MessageId}'");
-
                 try
                 {
-                    var success = await _brokerHost.PublishAsync(
+                    success = await _brokerHost.PublishAsync(
                         context.Topic,
                         context.Payload,
                         context.QoS,
@@ -467,6 +482,14 @@ namespace MqttRelayService.Services.Implementations
                 _logger.LogError(ex, "消息 {MessageId} 注入 Topic {Topic} 时发生异常",
                     context.MessageId, context.Topic);
                 return false;
+            }
+            finally
+            {
+                if (!cancellationToken.IsCancellationRequested)
+                {
+                    var elapsedMs = Math.Max(0, (DateTime.Now - context.Timestamp).TotalMilliseconds);
+                    _metrics?.RecordForwarded(context, success, message.RetryCount, elapsedMs, isSubscriberHit);
+                }
             }
         }
 

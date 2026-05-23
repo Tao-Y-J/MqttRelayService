@@ -417,7 +417,7 @@ namespace MqttRelayService.Tests
         }
 
         [Fact]
-        public async Task MetricsMqttBrokerHost_PublishAsync_WithCurrentMessageIdInContext_ShouldReuseOriginalMessageId()
+        public async Task MetricsMqttBrokerHost_PublishAsync_WithCurrentMessageIdInContext_ShouldSkipDuplicateMetrics()
         {
             // Arrange
             var mockMetrics = new Mock<IMetricsService>();
@@ -441,12 +441,12 @@ namespace MqttRelayService.Tests
                 // Assert
                 Assert.True(success);
                 mockMetrics.Verify(m => m.RecordForwarded(
-                    It.Is<RouteContext>(ctx => ctx.MessageId == originalMessageId && ctx.Topic == "topic_abc" && ctx.SourceClientId == "client_abc"),
-                    true,
-                    0,
+                    It.IsAny<RouteContext>(),
+                    It.IsAny<bool>(),
+                    It.IsAny<int>(),
                     It.IsAny<double>(),
                     It.IsAny<bool>()
-                ), Times.Once);
+                ), Times.Never);
             }
             finally
             {

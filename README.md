@@ -58,6 +58,12 @@ src/MqttRelayService/bin/Release/net8.0/win-x64/publish/
    Scripts\install-service.cmd
    ```
 
+仓库根目录还提供了一个本地压测快捷脚本：
+```powershell
+run-stress-60s.cmd
+```
+它会直接调用 `stress_mqtt_1883.py`，默认对 `127.0.0.1:1883` 连续压测 60 秒。
+
 ### 卸载
 
 ```powershell
@@ -161,6 +167,8 @@ Scripts\uninstall-service.cmd
 停机排空使用 `ShutdownDrainTimeoutMs` 作为总超时。当前默认配置已将 `ShutdownDrainTimeoutMs` 设置为 `30000ms`，与默认 `RetryMaxDelayMs` 一致。停机 drain 阶段遇到失败消息时会同步等待该次退避结束后再尝试重新入队；如果将 `ShutdownDrainTimeoutMs` 调小到 `RetryMaxDelayMs` 以下，排空超时会先触发，消息将按当前逻辑保留回队列或转入死信收敛，不再继续当次下一次注入尝试。
 
 默认使用 SQLite 审计库存储，连接串 `Data Source=data/audit.db` 会被解析到运行目录下的 `data` 目录；如果数据库文件不存在，启动时会自动创建目录、建库并初始化表结构。
+
+Dashboard 消息审计页里的“延迟 / 处理耗时”表示消息被 Broker 拦截接收后，到服务成功重新注入 Broker 为止的内部处理耗时，不表示发布端到订阅端的端到端网络延迟。
 
 ## Topic 规范
 
