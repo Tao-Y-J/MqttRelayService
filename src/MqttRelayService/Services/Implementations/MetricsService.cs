@@ -22,6 +22,7 @@ namespace MqttRelayService.Services.Implementations
         private const int MaxLogCount = 100;
         private const int MaxHistorySnapshots = 60; // 2秒一次，保存120秒（2分钟）的历史
         private const int AuditFlushBatchSize = 1000;
+        private static readonly TimeSpan AuditFlushCoalesceDelay = TimeSpan.FromMilliseconds(50);
 
         private readonly InMemoryMessageQueue _queue;
         private readonly IClientRegistry _clientRegistry;
@@ -319,8 +320,13 @@ namespace MqttRelayService.Services.Implementations
                         break;
                     }
 
+                    await Task.Delay(AuditFlushCoalesceDelay, _auditWriterCts.Token);
                     Interlocked.Exchange(ref _auditFlushRequested, 0);
                     await FlushPendingAuditsAsync();
+                }
+                catch (OperationCanceledException) when (_auditWriterCts.IsCancellationRequested)
+                {
+                    break;
                 }
                 catch (Exception ex)
                 {
@@ -567,6 +573,11 @@ namespace MqttRelayService.Services.Implementations
             if (ShouldKeepExistingAuditState(existing.Status, incoming.Status))
             {
                 existing.UpdatedAt = incoming.UpdatedAt;
+                existing.Topic = incoming.Topic;
+                existing.SourceClientId = incoming.SourceClientId;
+                existing.PayloadSize = incoming.PayloadSize;
+                existing.Qos = incoming.Qos;
+                existing.Retain = incoming.Retain;
                 existing.IsSubscriberHit = existing.IsSubscriberHit || incoming.IsSubscriberHit;
                 existing.RetryCount = Math.Max(existing.RetryCount, incoming.RetryCount);
                 existing.LatencyMs = Math.Max(existing.LatencyMs, incoming.LatencyMs);

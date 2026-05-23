@@ -546,6 +546,61 @@ namespace MqttRelayService.Tests
         }
 
         [Fact]
+        public async Task MetricsService_RecordReceivedAndForwardedInSameFlushWindow_ShouldPersistOnlyFinalState()
+        {
+            var now = DateTime.Now;
+            var firstBatch = new TaskCompletionSource<IReadOnlyList<MessageAuditRecord>>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            _mockAuditRepository
+                .Setup(r => r.RecordMessageAuditsAsync(It.IsAny<IReadOnlyList<MessageAuditRecord>>()))
+                .Callback<IReadOnlyList<MessageAuditRecord>>(records =>
+                {
+                    firstBatch.TrySetResult(records.ToList());
+                })
+                .Returns(Task.CompletedTask);
+
+            using var metricsService = new MetricsService(
+                _queue,
+                _mockClientRegistry.Object,
+                _serviceOptions,
+                _mqttOptions,
+                _reliabilityOptions,
+                _mockAuditRepository.Object,
+                _mockLogger.Object);
+
+            var message = new ForwardMessage
+            {
+                MessageId = "coalesced_final_msg",
+                RouteContext = new RouteContext
+                {
+                    MessageId = "coalesced_final_msg",
+                    Topic = "coalesced/topic",
+                    Payload = new byte[] { 1, 2, 3 },
+                    QoS = 1,
+                    Retain = false,
+                    SourceClientId = "coalesced_client",
+                    Timestamp = now
+                }
+            };
+
+            metricsService.RecordReceived(message);
+            metricsService.RecordForwarded(message.RouteContext, success: true, retryCount: 0, latencyMs: 5.5, isSubscriberHit: true);
+
+            var completed = await Task.WhenAny(firstBatch.Task, Task.Delay(TimeSpan.FromSeconds(2)));
+            Assert.Same(firstBatch.Task, completed);
+
+            var records = await firstBatch.Task;
+            var record = Assert.Single(records);
+            Assert.Equal("coalesced_final_msg", record.MessageId);
+            Assert.Equal("Succeeded", record.Status);
+            Assert.True(record.IsSubscriberHit);
+            Assert.Equal(5.5, record.LatencyMs);
+
+            await Task.Delay(TimeSpan.FromMilliseconds(150));
+            _mockAuditRepository.Verify(r => r.RecordMessageAuditsAsync(It.IsAny<IReadOnlyList<MessageAuditRecord>>()), Times.Once);
+        }
+
+        [Fact]
         public async Task MetricsService_RecordForwarded_WhenAuditBatchFails_ShouldRetryPendingAudit()
         {
             var now = DateTime.Now;

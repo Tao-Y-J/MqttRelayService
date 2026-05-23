@@ -120,6 +120,7 @@ namespace MqttRelayService.Tests
         {
             await _repository.InitializeAsync();
             var now = DateTime.Now;
+            var firstCreatedAt = now.AddSeconds(-2);
 
             await _repository.RecordMessageAuditsAsync(new[]
             {
@@ -132,8 +133,8 @@ namespace MqttRelayService.Tests
                     Qos = 0,
                     Retain = false,
                     Status = "Queued",
-                    CreatedAt = now.AddSeconds(-2),
-                    UpdatedAt = now.AddSeconds(-2)
+                    CreatedAt = firstCreatedAt,
+                    UpdatedAt = firstCreatedAt
                 },
                 new MessageAuditRecord
                 {
@@ -161,7 +162,7 @@ namespace MqttRelayService.Tests
                     Retain = false,
                     Status = "Succeeded",
                     LatencyMs = 12.3,
-                    CreatedAt = now.AddSeconds(-2),
+                    CreatedAt = now.AddMinutes(1),
                     UpdatedAt = now
                 },
                 new MessageAuditRecord
@@ -187,12 +188,60 @@ namespace MqttRelayService.Tests
             var batch1 = items.Single(x => x.MessageId == "batch_1");
             Assert.Equal("Succeeded", batch1.Status);
             Assert.Equal(12.3, batch1.LatencyMs);
+            AssertDateTimeClose(firstCreatedAt, batch1.CreatedAt);
+            AssertDateTimeClose(now, batch1.UpdatedAt);
 
             var batch2 = items.Single(x => x.MessageId == "batch_2");
             Assert.Equal("Queued", batch2.Status);
 
             var batch3 = items.Single(x => x.MessageId == "batch_3");
             Assert.Equal("Succeeded", batch3.Status);
+        }
+
+        [Fact]
+        public async Task RecordMessageAuditsAsync_ShouldKeepLatestRecordWhenSameMessageAppearsInOneBatch()
+        {
+            await _repository.InitializeAsync();
+            var now = DateTime.Now;
+
+            await _repository.RecordMessageAuditsAsync(new[]
+            {
+                new MessageAuditRecord
+                {
+                    MessageId = "same_batch_1",
+                    Topic = "topic/same",
+                    SourceClientId = "client_same",
+                    PayloadSize = 1,
+                    Qos = 0,
+                    Retain = false,
+                    Status = "Queued",
+                    CreatedAt = now.AddSeconds(-1),
+                    UpdatedAt = now.AddSeconds(-1)
+                },
+                new MessageAuditRecord
+                {
+                    MessageId = "same_batch_1",
+                    Topic = "topic/same",
+                    SourceClientId = "client_same",
+                    PayloadSize = 1,
+                    Qos = 0,
+                    Retain = false,
+                    Status = "Succeeded",
+                    IsSubscriberHit = true,
+                    LatencyMs = 8.5,
+                    CreatedAt = now.AddSeconds(-1),
+                    UpdatedAt = now
+                }
+            });
+
+            var (total, items) = await _repository.GetPagedMessagesAsync(1, 10);
+
+            Assert.Equal(1, total);
+            var record = Assert.Single(items);
+            Assert.Equal("same_batch_1", record.MessageId);
+            Assert.Equal("Succeeded", record.Status);
+            Assert.True(record.IsSubscriberHit);
+            Assert.Equal(8.5, record.LatencyMs);
         }
 
         [Fact]
@@ -226,6 +275,67 @@ namespace MqttRelayService.Tests
             Assert.Equal(0, summary.TotalPending);
             Assert.Equal(0, summary.TotalFailed);
             Assert.Equal(0, summary.TotalDeadLetter);
+        }
+
+        [Fact]
+        public async Task RecordMessageAuditsAsync_ShouldUpdateLargeSqliteBatchToLatestState()
+        {
+            await _repository.InitializeAsync();
+            var now = DateTime.Now;
+            var queuedRecords = Enumerable.Range(1, 600)
+                .Select(i => new MessageAuditRecord
+                {
+                    MessageId = $"bulk_update_{i:D4}",
+                    Topic = $"topic/{i % 8}",
+                    SourceClientId = $"client_{i % 16}",
+                    PayloadSize = 64,
+                    Payload = "payload",
+                    Qos = 0,
+                    Retain = false,
+                    Status = "Queued",
+                    LatencyMs = 0,
+                    RetryCount = 0,
+                    CreatedAt = now.AddMilliseconds(i),
+                    UpdatedAt = now.AddMilliseconds(i)
+                })
+                .ToList();
+            var succeededRecords = queuedRecords
+                .Select(x => new MessageAuditRecord
+                {
+                    MessageId = x.MessageId,
+                    Topic = x.Topic,
+                    SourceClientId = x.SourceClientId,
+                    PayloadSize = x.PayloadSize,
+                    Payload = x.Payload,
+                    Qos = x.Qos,
+                    Retain = x.Retain,
+                    Status = "Succeeded",
+                    IsSubscriberHit = true,
+                    LatencyMs = 10.5,
+                    RetryCount = 0,
+                    CreatedAt = x.CreatedAt.AddMinutes(1),
+                    UpdatedAt = x.UpdatedAt.AddMinutes(1)
+                })
+                .ToList();
+
+            await _repository.RecordMessageAuditsAsync(queuedRecords);
+            await _repository.RecordMessageAuditsAsync(succeededRecords);
+
+            var summary = await _repository.GetDashboardMessageSummaryAsync(10);
+
+            Assert.Equal(600, summary.TotalMessages);
+            Assert.Equal(600, summary.TotalSucceeded);
+            Assert.Equal(0, summary.TotalPending);
+            Assert.Equal(0, summary.TotalFailed);
+            Assert.Equal(0, summary.TotalDeadLetter);
+
+            var (_, firstPage) = await _repository.GetPagedMessagesAsync(1, 10);
+            Assert.All(firstPage, item =>
+            {
+                Assert.Equal("Succeeded", item.Status);
+                Assert.True(item.IsSubscriberHit);
+                Assert.Equal(10.5, item.LatencyMs);
+            });
         }
 
         [Fact]
@@ -384,6 +494,13 @@ namespace MqttRelayService.Tests
         {
             var actual = AuditRepository.ParseDbType(provider);
             Assert.Equal(expectedDbType, actual);
+        }
+
+        private static void AssertDateTimeClose(DateTime expected, DateTime actual)
+        {
+            Assert.True(
+                Math.Abs((actual - expected).TotalMilliseconds) < 10,
+                $"Expected {actual:o} to be within 10ms of {expected:o}.");
         }
     }
 }

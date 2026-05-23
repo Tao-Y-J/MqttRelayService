@@ -18,8 +18,8 @@ namespace MqttRelayService.Services.Implementations
     /// </summary>
     public class AuditRepository : IAuditRepository
     {
-        private const int SqliteExistsQueryBatchSize = 500;
-        private const int SqliteWriteBatchSize = 50;
+        private const int SqliteExistsQueryBatchSize = 2000;
+        private const int SqliteWriteBatchSize = 500;
         private const int DefaultExistsQueryBatchSize = 2000;
         private const int DefaultWriteBatchSize = 200;
         private readonly AuditStorageOptions _options;
