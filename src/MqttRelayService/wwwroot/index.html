@@ -528,6 +528,12 @@
             table-layout: fixed;
         }
 
+        .content-table {
+            table-layout: auto;
+            min-width: 100%;
+            width: max-content;
+        }
+
         th {
             background: rgba(255, 255, 255, 0.02);
             color: var(--text-secondary);
@@ -548,6 +554,36 @@
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
+        }
+
+        .cell-tight {
+            width: 1%;
+            white-space: nowrap;
+        }
+
+        .cell-action {
+            width: 1%;
+            text-align: center;
+            white-space: nowrap;
+        }
+
+        .cell-main {
+            min-width: 180px;
+        }
+
+        .cell-code-wide {
+            min-width: 220px;
+        }
+
+        .cell-topic {
+            min-width: 180px;
+        }
+
+        .cell-detail {
+            min-width: 280px;
+            white-space: normal;
+            word-break: break-word;
+            line-height: 1.45;
         }
 
         tr {
@@ -980,16 +1016,16 @@
                     <button class="filter-btn" onclick="switchTab('messages')">查看全部</button>
                 </div>
                 <div class="table-responsive paged-table-responsive">
-                    <table class="fixed-table">
+                    <table class="fixed-table content-table">
                         <colgroup>
-                            <col style="width: 12%">
-                            <col style="width: 15%">
-                            <col style="width: 12%">
-                            <col style="width: 19%">
-                            <col style="width: 16%">
-                            <col style="width: 9%">
-                            <col style="width: 9%">
-                            <col style="width: 8%">
+                            <col style="width: 120px">
+                            <col style="width: 220px">
+                            <col style="width: 220px">
+                            <col style="width: 220px">
+                            <col style="width: 140px">
+                            <col style="width: 96px">
+                            <col style="width: 88px">
+                            <col style="width: 88px">
                         </colgroup>
                         <thead>
                             <tr>
@@ -1093,14 +1129,14 @@
                 </div>
                 <div class="paged-table-shell">
                     <div class="table-responsive paged-table-responsive">
-                        <table class="fixed-table">
+                        <table class="fixed-table content-table">
                             <colgroup>
-                                <col style="width: 16%">
-                                <col style="width: 14%">
-                                <col style="width: 12%">
-                                <col style="width: 18%">
-                                <col style="width: 12%">
-                                <col style="width: 28%">
+                                <col style="width: 170px">
+                                <col style="width: 220px">
+                                <col style="width: 140px">
+                                <col style="width: 220px">
+                                <col style="width: 100px">
+                                <col style="width: 360px">
                             </colgroup>
                             <thead>
                                 <tr>
@@ -1160,17 +1196,17 @@
                 </div>
                 <div class="paged-table-shell">
                     <div class="table-responsive paged-table-responsive">
-                        <table class="fixed-table">
+                        <table class="fixed-table content-table">
                             <colgroup>
-                                <col style="width: 14%">
-                                <col style="width: 17%">
-                                <col style="width: 13%">
-                                <col style="width: 17%">
-                                <col style="width: 8%">
-                                <col style="width: 8%">
-                                <col style="width: 8%">
-                                <col style="width: 8%">
-                                <col style="width: 7%">
+                                <col style="width: 170px">
+                                <col style="width: 280px">
+                                <col style="width: 220px">
+                                <col style="width: 220px">
+                                <col style="width: 100px">
+                                <col style="width: 88px">
+                                <col style="width: 96px">
+                                <col style="width: 88px">
+                                <col style="width: 88px">
                             </colgroup>
                             <thead>
                                 <tr>
@@ -1635,6 +1671,29 @@
         }
 
         // ==================== 吞吐与并发控制交互 ====================
+        function escapeHtml(value) {
+            return String(value ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function formatMiddleEllipsis(value, head = 12, tail = 8) {
+            const text = value == null ? '' : String(value);
+            if (text.length <= head + tail + 3) {
+                return text;
+            }
+
+            return `${text.slice(0, head)}...${text.slice(-tail)}`;
+        }
+
+        function buildCell(content, className = '', title = '') {
+            const safeTitle = escapeHtml(title || content || '');
+            return `<td class="${className}" title="${safeTitle}">${content}</td>`;
+        }
+
         function getMpsValueFromSliderIndex(index) {
             const safeIndex = Math.max(0, Math.min(mpsSliderStops.length - 1, parseInt(index)));
             return mpsSliderStops[safeIndex];
@@ -1761,14 +1820,14 @@
             } else {
                 recentTbody.innerHTML = recentLogs.map(log => `
                             <tr class="tr-clickable" onclick="openMessageDetail('${log.messageId}')">
-                                <td class="code-text">${formatTime(log.timestamp)}</td>
-                                <td class="code-text">${log.messageId.substring(0, 8)}...</td>
-                                <td class="code-bold">${log.sourceClientId}</td>
-                                <td class="code-text" style="color: var(--color-cyan)">${log.topic}</td>
-                                <td class="code-text">QoS ${log.qos} ${log.retain ? '| Retain' : ''}</td>
-                                <td><span class="badge badge-${log.status.toLowerCase()}">${getStatusChinese(log.status)}</span></td>
-                                <td>${getHitBadge(log)}</td>
-                                <td style="text-align: center;">
+                                ${buildCell(formatTime(log.timestamp), 'code-text cell-tight', formatTime(log.timestamp))}
+                                ${buildCell(escapeHtml(formatMiddleEllipsis(log.messageId, 14, 10)), 'code-text cell-code-wide', log.messageId)}
+                                ${buildCell(escapeHtml(log.sourceClientId || ''), 'code-bold cell-main', log.sourceClientId)}
+                                ${buildCell(escapeHtml(log.topic || ''), 'code-text cell-topic', log.topic)}
+                                ${buildCell(`QoS ${log.qos} ${log.retain ? '| Retain' : ''}`, 'code-text cell-tight', `QoS ${log.qos}${log.retain ? ' | Retain' : ''}`)}
+                                ${buildCell(`<span class="badge badge-${log.status.toLowerCase()}">${getStatusChinese(log.status)}</span>`, 'cell-tight', getStatusChinese(log.status))}
+                                ${buildCell(getHitBadge(log), 'cell-tight', log.matchedSubscriberCount > 0 ? '命中' : '未命中')}
+                                <td class="cell-action">
                                     <button class="btn-action" onclick="openMessageDetail('${log.messageId}'); event.stopPropagation();">
                                         <i class="fa-solid fa-eye"></i> 查看
                                     </button>

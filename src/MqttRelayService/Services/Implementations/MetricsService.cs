@@ -21,6 +21,7 @@ namespace MqttRelayService.Services.Implementations
     {
         private const int MaxLogCount = 100;
         private const int MaxHistorySnapshots = 60; // 2秒一次，保存120秒（2分钟）的历史
+        private const int AuditFlushBatchSize = 1000;
 
         private readonly InMemoryMessageQueue _queue;
         private readonly IClientRegistry _clientRegistry;
@@ -352,8 +353,7 @@ namespace MqttRelayService.Services.Implementations
                     break;
                 }
 
-                const int batchSize = 100;
-                var batch = new List<MessageAuditRecord>(batchSize);
+                var batch = new List<MessageAuditRecord>(AuditFlushBatchSize);
 
                 foreach (var pair in snapshot)
                 {
@@ -364,7 +364,7 @@ namespace MqttRelayService.Services.Implementations
 
                     batch.Add(latestRecord);
 
-                    if (batch.Count >= batchSize)
+                    if (batch.Count >= AuditFlushBatchSize)
                     {
                         await WriteAuditBatchOrRequeueAsync(batch);
                         batch.Clear();
@@ -668,6 +668,35 @@ namespace MqttRelayService.Services.Implementations
             var totalDeadLetter = _dashboardBaselineDeadLetter + Interlocked.Read(ref _totalDeadLetter);
             var totalPending = _queue.Count;
             IEnumerable<object> logs = _messageLogs.Values.OrderByDescending(x => x.SystemTimestamp).Cast<object>().ToList();
+
+            if (_auditRepository != null)
+            {
+                var summary = await _auditRepository.GetDashboardMessageSummaryAsync(MaxLogCount);
+                totalReceived = Math.Max(0, summary.TotalMessages);
+                totalSucceeded = Math.Max(0, summary.TotalSucceeded);
+                totalFailed = Math.Max(0, summary.TotalFailed);
+                totalDeadLetter = Math.Max(0, summary.TotalDeadLetter);
+                totalPending = Math.Max(0, summary.TotalPending);
+                logs = summary.RecentItems
+                    .OrderByDescending(x => x.CreatedAt)
+                    .Select(x => (object)new MessageLogEntry
+                    {
+                        MessageId = x.MessageId,
+                        Topic = x.Topic,
+                        SourceClientId = x.SourceClientId,
+                        PayloadSize = x.PayloadSize,
+                        Qos = x.Qos,
+                        Retain = x.Retain,
+                        Status = x.Status,
+                        IsSubscriberHit = x.IsSubscriberHit,
+                        LatencyMs = x.LatencyMs,
+                        RetryCount = x.RetryCount,
+                        Timestamp = x.UpdatedAt.ToString("o"),
+                        ErrorMessage = x.ErrorMessage ?? string.Empty,
+                        SystemTimestamp = x.UpdatedAt
+                    })
+                    .ToList();
+            }
 
             return new
             {

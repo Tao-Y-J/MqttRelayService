@@ -161,18 +161,7 @@ namespace MqttRelayService.Services.Implementations
             try
             {
                 await EnsureSchemaAsync();
-
-                var exists = await _db.Queryable<MessageAuditRecord>().AnyAsync(x => x.MessageId == record.MessageId);
-                if (exists)
-                {
-                    await _db.Updateable(record)
-                        .IgnoreColumns(x => new { x.CreatedAt })
-                        .ExecuteCommandAsync();
-                }
-                else
-                {
-                    await _db.Insertable(record).ExecuteCommandAsync();
-                }
+                await UpsertMessageAuditsInternalAsync(new[] { record });
 
             }
             catch (Exception ex)
@@ -194,25 +183,7 @@ namespace MqttRelayService.Services.Implementations
             try
             {
                 await EnsureSchemaAsync();
-
-                // 使用事务进行高性能批量写入
-                await _db.UseTranAsync(async () =>
-                {
-                    foreach (var record in records)
-                    {
-                        var exists = await _db.Queryable<MessageAuditRecord>().AnyAsync(x => x.MessageId == record.MessageId);
-                        if (exists)
-                        {
-                            await _db.Updateable(record)
-                                .IgnoreColumns(x => new { x.CreatedAt })
-                                .ExecuteCommandAsync();
-                        }
-                        else
-                        {
-                            await _db.Insertable(record).ExecuteCommandAsync();
-                        }
-                    }
-                });
+                await UpsertMessageAuditsInternalAsync(records);
 
             }
             catch (Exception ex)
@@ -224,6 +195,60 @@ namespace MqttRelayService.Services.Implementations
             {
                 _writeLock.Release();
             }
+        }
+
+        private async Task UpsertMessageAuditsInternalAsync(IReadOnlyList<MessageAuditRecord> records)
+        {
+            if (records.Count == 0)
+            {
+                return;
+            }
+
+            var latestRecords = records
+                .GroupBy(x => x.MessageId, StringComparer.Ordinal)
+                .Select(g => g.Last())
+                .ToList();
+
+            var messageIds = latestRecords
+                .Select(x => x.MessageId)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
+            if (messageIds.Count == 0)
+            {
+                return;
+            }
+
+            var existingIds = new HashSet<string>(
+                await _db.Queryable<MessageAuditRecord>()
+                    .Where(x => messageIds.Contains(x.MessageId))
+                    .Select(x => x.MessageId)
+                    .ToListAsync(),
+                StringComparer.Ordinal);
+
+            var toInsert = latestRecords
+                .Where(x => !existingIds.Contains(x.MessageId))
+                .ToList();
+
+            var toUpdate = latestRecords
+                .Where(x => existingIds.Contains(x.MessageId))
+                .ToList();
+
+            await _db.UseTranAsync(async () =>
+            {
+                if (toInsert.Count > 0)
+                {
+                    await _db.Insertable(toInsert).ExecuteCommandAsync();
+                }
+
+                if (toUpdate.Count > 0)
+                {
+                    await _db.Updateable(toUpdate)
+                        .IgnoreColumns(x => new { x.CreatedAt })
+                        .ExecuteCommandAsync();
+                }
+            });
         }
 
         public async Task RecordClientConnectionHistoryAsync(ClientConnectionHistoryRecord record)

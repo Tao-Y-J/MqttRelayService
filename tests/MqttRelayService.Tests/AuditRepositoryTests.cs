@@ -116,6 +116,86 @@ namespace MqttRelayService.Tests
         }
 
         [Fact]
+        public async Task RecordMessageAuditsAsync_ShouldBatchInsertAndUpdateWithoutDuplicatingMessageIds()
+        {
+            await _repository.InitializeAsync();
+            var now = DateTime.Now;
+
+            await _repository.RecordMessageAuditsAsync(new[]
+            {
+                new MessageAuditRecord
+                {
+                    MessageId = "batch_1",
+                    Topic = "topic/batch/1",
+                    SourceClientId = "client_1",
+                    PayloadSize = 1,
+                    Qos = 0,
+                    Retain = false,
+                    Status = "Queued",
+                    CreatedAt = now.AddSeconds(-2),
+                    UpdatedAt = now.AddSeconds(-2)
+                },
+                new MessageAuditRecord
+                {
+                    MessageId = "batch_2",
+                    Topic = "topic/batch/2",
+                    SourceClientId = "client_2",
+                    PayloadSize = 1,
+                    Qos = 0,
+                    Retain = false,
+                    Status = "Queued",
+                    CreatedAt = now.AddSeconds(-1),
+                    UpdatedAt = now.AddSeconds(-1)
+                }
+            });
+
+            await _repository.RecordMessageAuditsAsync(new[]
+            {
+                new MessageAuditRecord
+                {
+                    MessageId = "batch_1",
+                    Topic = "topic/batch/1",
+                    SourceClientId = "client_1",
+                    PayloadSize = 1,
+                    Qos = 0,
+                    Retain = false,
+                    Status = "Succeeded",
+                    LatencyMs = 12.3,
+                    CreatedAt = now.AddSeconds(-2),
+                    UpdatedAt = now
+                },
+                new MessageAuditRecord
+                {
+                    MessageId = "batch_3",
+                    Topic = "topic/batch/3",
+                    SourceClientId = "client_3",
+                    PayloadSize = 1,
+                    Qos = 0,
+                    Retain = false,
+                    Status = "Succeeded",
+                    LatencyMs = 6.5,
+                    CreatedAt = now,
+                    UpdatedAt = now
+                }
+            });
+
+            var (total, items) = await _repository.GetPagedMessagesAsync(1, 10);
+
+            Assert.Equal(3, total);
+            Assert.Equal(3, items.Select(x => x.MessageId).Distinct(StringComparer.Ordinal).Count());
+
+            var batch1 = items.Single(x => x.MessageId == "batch_1");
+            Assert.Equal("Succeeded", batch1.Status);
+            Assert.Equal(12.3, batch1.LatencyMs);
+
+            var batch2 = items.Single(x => x.MessageId == "batch_2");
+            Assert.Equal("Queued", batch2.Status);
+
+            var batch3 = items.Single(x => x.MessageId == "batch_3");
+            Assert.Equal("Succeeded", batch3.Status);
+        }
+
+        [Fact]
         public async Task RecordClientConnectionHistoryAsync_ShouldSaveAndFilterCorrectly()
         {
             await _repository.InitializeAsync();
