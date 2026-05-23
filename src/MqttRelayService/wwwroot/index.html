@@ -958,7 +958,7 @@
                                     <span style="color: var(--text-secondary); font-weight: 500;">单线程最大转发量 (MPS)</span>
                                     <span id="val-mps" class="code-bold" style="color: var(--color-cyan);">无限制</span>
                                 </div>
-                                <input type="range" id="slider-mps" min="0" max="200" step="5" value="0" oninput="onMpsSliderChange(this.value)" onchange="applyThroughputSettings()">
+                                <input type="range" id="slider-mps" min="0" max="6" step="1" value="6" oninput="onMpsSliderChange(this.value)" onchange="applyThroughputSettings()">
                             </div>
                             <!-- 并发度滑动条 -->
                             <div>
@@ -1430,6 +1430,7 @@
         // ==================== 全局状态 ====================
         let currentTab = 'dashboard';
         let rawMetrics = null;
+        const mpsSliderStops = [100, 200, 500, 1000, 3000, 10000, 0];
         let throughputSettings = {
             maxMessagesPerSecond: 0,
             maxConcurrency: 50,
@@ -1635,8 +1636,8 @@
         // 将吞吐控制参数反向同步到滑动条
         function syncSlidersUI() {
             const mpsSlider = document.getElementById('slider-mps');
-            mpsSlider.value = throughputSettings.maxMessagesPerSecond;
-            onMpsSliderChange(throughputSettings.maxMessagesPerSecond);
+            mpsSlider.value = getMpsSliderIndex(throughputSettings.maxMessagesPerSecond);
+            onMpsSliderChange(mpsSlider.value);
 
             const concSlider = document.getElementById('slider-concurrency');
             concSlider.value = throughputSettings.maxConcurrency;
@@ -1644,13 +1645,24 @@
         }
 
         // ==================== 吞吐与并发控制交互 ====================
+        function getMpsValueFromSliderIndex(index) {
+            const safeIndex = Math.max(0, Math.min(mpsSliderStops.length - 1, parseInt(index)));
+            return mpsSliderStops[safeIndex];
+        }
+
+        function getMpsSliderIndex(mps) {
+            const exactIndex = mpsSliderStops.indexOf(parseInt(mps));
+            return exactIndex >= 0 ? exactIndex : mpsSliderStops.length - 1;
+        }
+
         function onMpsSliderChange(val) {
             const display = document.getElementById('val-mps');
-            if (parseInt(val) === 0) {
+            const mps = getMpsValueFromSliderIndex(val);
+            if (mps === 0) {
                 display.textContent = '无限制';
                 display.style.color = 'var(--text-secondary)';
             } else {
-                display.textContent = val + ' msgs/sec/thread';
+                display.textContent = mps + ' msgs/sec/thread';
                 display.style.color = 'var(--color-cyan)';
             }
         }
@@ -1663,7 +1675,7 @@
 
         // 物理提交流控配置更新到后端 API
         async function applyThroughputSettings() {
-            const mps = parseInt(document.getElementById('slider-mps').value);
+            const mps = getMpsValueFromSliderIndex(document.getElementById('slider-mps').value);
             const concurrency = parseInt(document.getElementById('slider-concurrency').value);
 
             const payload = {
