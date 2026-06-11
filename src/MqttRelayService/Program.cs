@@ -22,7 +22,7 @@ namespace MqttRelayService
     /// </summary>
     public class Program
     {
-        public static void Main(string[] args)
+        public static async Task Main(string[] args)
         {
             try
             {
@@ -43,7 +43,7 @@ namespace MqttRelayService
 
                 if (bootstrapWebOptions.Enabled)
                 {
-                    RunWebHost(args);
+                    await RunWebHostAsync(args);
                 }
                 else
                 {
@@ -61,7 +61,7 @@ namespace MqttRelayService
             }
         }
 
-        private static void RunWebHost(string[] args)
+        private static async Task RunWebHostAsync(string[] args)
         {
             var builder = WebApplication.CreateBuilder(args);
 
@@ -82,17 +82,17 @@ namespace MqttRelayService
             using (var scope = app.Services.CreateScope())
             {
                 var auditRepository = scope.ServiceProvider.GetRequiredService<IAuditRepository>();
-                auditRepository.InitializeAsync().GetAwaiter().GetResult();
+                await auditRepository.InitializeAsync();
 
                 if (scope.ServiceProvider.GetRequiredService<IMetricsService>() is MetricsService metricsService)
                 {
-                    metricsService.InitializeDashboardCountersFromAuditAsync().GetAwaiter().GetResult();
+                    await metricsService.InitializeDashboardCountersFromAuditAsync();
                 }
             }
 
             MapWebEndpoints(app);
             MapDashboard(app);
-            app.Run();
+            await app.RunAsync();
         }
 
         private static void RunWorkerHost(string[] args)
@@ -146,7 +146,11 @@ namespace MqttRelayService
             services.Configure<WebOptions>(configuration.GetSection("Web"));
             services.Configure<AuditStorageOptions>(configuration.GetSection("AuditStorage"));
 
-            services.AddSingleton<ThroughputController>();
+            services.AddSingleton(sp =>
+            {
+                var reliabilityOptions = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<ReliabilityOptions>>().Value;
+                return new ThroughputController(reliabilityOptions.MaxConcurrencyHardLimit);
+            });
             services.AddSingleton<IAuthService, AuthService>();
 
             if (enableWeb)
@@ -194,13 +198,34 @@ namespace MqttRelayService
 
         private static void MapWebEndpoints(WebApplication app)
         {
-            app.MapGet("/api/metrics", async (IMetricsService metricsService) =>
+            var webOptions = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<WebOptions>>().Value;
+            var api = app.MapGroup("/api");
+
+            // API Key 认证过滤器：ApiKey 为空时跳过校验，否则校验请求头 X-Api-Key
+            api.AddEndpointFilter(async (context, next) =>
+            {
+                var apiKey = webOptions.ApiKey;
+                if (string.IsNullOrEmpty(apiKey))
+                {
+                    return await next(context);
+                }
+
+                var requestApiKey = context.HttpContext.Request.Headers["X-Api-Key"].FirstOrDefault();
+                if (string.Equals(requestApiKey, apiKey, StringComparison.Ordinal))
+                {
+                    return await next(context);
+                }
+
+                return Results.Unauthorized();
+            });
+
+            api.MapGet("/metrics", async (IMetricsService metricsService) =>
             {
                 var data = await metricsService.GetDashboardDataAsync();
                 return Results.Ok(data);
             });
 
-            app.MapGet("/api/messages", async (
+            api.MapGet("/messages", async (
                 IAuditRepository auditRepo,
                 int? page,
                 int? pageSize,
@@ -229,7 +254,7 @@ namespace MqttRelayService
                 return Results.Ok(new { total = result.TotalCount, items = result.Items });
             });
 
-            app.MapGet("/api/payload/{messageId}", async (
+            api.MapGet("/payload/{messageId}", async (
                 string messageId,
                 IMetricsService metricsService,
                 IAuditRepository auditRepo) =>
@@ -257,7 +282,7 @@ namespace MqttRelayService
                 return Results.NotFound(new { messageId, error = "Message payload not found." });
             });
 
-            app.MapGet("/api/settings/throughput", (ThroughputController controller) =>
+            api.MapGet("/settings/throughput", (ThroughputController controller) =>
             {
                 return Results.Ok(new
                 {
@@ -267,7 +292,7 @@ namespace MqttRelayService
                 });
             });
 
-            app.MapPost("/api/settings/throughput", (ThroughputSettingsDto settings, ThroughputController controller) =>
+            api.MapPost("/settings/throughput", (ThroughputSettingsDto settings, ThroughputController controller) =>
             {
                 controller.UpdateMaxMessagesPerSecond(settings.MaxMessagesPerSecond);
                 controller.UpdateMaxConcurrency(settings.MaxConcurrency);
@@ -280,7 +305,7 @@ namespace MqttRelayService
                 });
             });
 
-            app.MapGet("/api/clients/active", async (IClientRegistry clientRegistry) =>
+            api.MapGet("/clients/active", async (IClientRegistry clientRegistry) =>
             {
                 var sessions = await clientRegistry.GetAllSessionsAsync();
                 var list = sessions.Select(s => new
@@ -296,7 +321,7 @@ namespace MqttRelayService
                 return Results.Ok(list);
             });
 
-            app.MapGet("/api/clients/history", async (
+            api.MapGet("/clients/history", async (
                 IAuditRepository auditRepo,
                 int? page,
                 int? pageSize,
@@ -308,6 +333,20 @@ namespace MqttRelayService
                 int ps = pageSize ?? 10;
                 var result = await auditRepo.GetPagedClientHistoryAsync(p, ps, clientId, eventType, search);
                 return Results.Ok(new { total = result.TotalCount, items = result.Items });
+            });
+
+            // 健康检查端点 — 不需要 API Key，直接暴露供监控探活
+            app.MapGet("/api/health", (IMqttBrokerHost brokerHost, IMessageQueue queue, IClientRegistry clientRegistry) =>
+            {
+                return Results.Ok(new
+                {
+                    status = "healthy",
+                    brokerRunning = brokerHost.IsRunning,
+                    queueDepth = queue.Count,
+                    queueCapacity = queue.Capacity,
+                    activeClients = clientRegistry.Count,
+                    timestamp = DateTime.Now.ToString("o")
+                });
             });
         }
 

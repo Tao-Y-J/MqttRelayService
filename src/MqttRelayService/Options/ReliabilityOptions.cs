@@ -71,5 +71,11 @@
         /// 队列满时是否丢弃新消息（否则阻塞等待）
         /// </summary>
         public bool DropWhenQueueFull { get; set; } = false;
+
+        /// <summary>
+        /// 吞吐控制器最大并发度的硬上限，防止运行时通过 API 调至过高值。
+        /// 默认 200。
+        /// </summary>
+        public int MaxConcurrencyHardLimit { get; set; } = 200;
     }
 }

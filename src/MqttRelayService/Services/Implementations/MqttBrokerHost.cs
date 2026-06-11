@@ -21,6 +21,11 @@ namespace MqttRelayService.Services.Implementations
         private const string RelayMessageIdUserPropertyName = "x-relay-message-id";
         private const string ConnectionIdSessionItemKey = "mqtt-relay-connection-id";
 
+        /// <summary>
+        /// 注入消息 ID 跟踪字典的容量上限，防止异常情况下无界增长导致内存泄漏。
+        /// </summary>
+        private const int MaxInjectedMessageIdTracking = 50000;
+
         private readonly IAuthService _authService;
         private readonly IClientRegistry _clientRegistry;
         private readonly IMessageQueue _messageQueue;
@@ -31,6 +36,7 @@ namespace MqttRelayService.Services.Implementations
 
         private MqttServer? _mqttServer;
         private bool _disposed;
+        private int _injectedMessageIdOverflowLogged;
 
         public MqttBrokerHost(
             IAuthService authService,
@@ -155,7 +161,14 @@ namespace MqttRelayService.Services.Implementations
                 if (!string.IsNullOrEmpty(sourceClientId))
                 {
                     relayMessageId = Guid.NewGuid().ToString("N");
-                    _injectedMessageIds.TryAdd(relayMessageId, 0);
+
+                    // 防止注入消息 ID 跟踪字典无界增长：超限时触发一次性清理，避免内存泄漏
+                    if (!TryTrackInjectedMessageId(relayMessageId))
+                    {
+                        // 跟踪失败意味着字典已满且无法清理旧条目——继续执行转发但无法 EchoToSender 过滤
+                        _logger.LogError("注入消息 ID 跟踪字典溢出，消息 {RelayMessageId} 无法被 EchoToSender 出站拦截识别",
+                            relayMessageId);
+                    }
 
                     messageBuilder.WithUserProperty(SourceClientIdUserPropertyName, Encoding.UTF8.GetBytes(sourceClientId));
                     messageBuilder.WithUserProperty(RelayMessageIdUserPropertyName, Encoding.UTF8.GetBytes(relayMessageId));
@@ -335,8 +348,51 @@ namespace MqttRelayService.Services.Implementations
                 ?.FirstOrDefault(p => p.Name == RelayMessageIdUserPropertyName)
                 ?.ReadValueAsString();
 
-            return !string.IsNullOrEmpty(relayMessageId)
-                && _injectedMessageIds.TryRemove(relayMessageId, out _);
+            if (string.IsNullOrEmpty(relayMessageId))
+            {
+                return false;
+            }
+
+            var removed = _injectedMessageIds.TryRemove(relayMessageId, out _);
+
+            // 正常清理后重置溢出日志计数器，允许下一次溢出时再次记录
+            if (removed && Interlocked.Exchange(ref _injectedMessageIdOverflowLogged, 0) > 0)
+            {
+                _logger.LogInformation("注入消息 ID 跟踪字典已恢复正常清理");
+            }
+
+            return removed;
+        }
+
+        /// <summary>
+        /// 尝试将注入消息 ID 加入跟踪字典，超限时触发一次性清理并记录错误。
+        /// </summary>
+        private bool TryTrackInjectedMessageId(string relayMessageId)
+        {
+            if (_injectedMessageIds.Count < MaxInjectedMessageIdTracking)
+            {
+                _injectedMessageIds.TryAdd(relayMessageId, 0);
+                return true;
+            }
+
+            // 超限：一次性清空字典以恢复服务，避免内存泄漏；后续转发消息将无法通过 EchoToSender 出站拦截识别
+            if (Interlocked.CompareExchange(ref _injectedMessageIdOverflowLogged, 1, 0) == 0)
+            {
+                _logger.LogError(
+                    "注入消息 ID 跟踪字典已超出容量上限 {MaxCapacity}，将清空字典以恢复服务。后续转发消息在本次生命周期内将无法被 EchoToSender 出站拦截识别，可能导致发送方收到自己发布的消息。",
+                    MaxInjectedMessageIdTracking);
+
+                _injectedMessageIds.Clear();
+            }
+
+            // 清空后重试一次
+            if (_injectedMessageIds.Count < MaxInjectedMessageIdTracking)
+            {
+                _injectedMessageIds.TryAdd(relayMessageId, 0);
+                return true;
+            }
+
+            return false;
         }
 
         /// <summary>

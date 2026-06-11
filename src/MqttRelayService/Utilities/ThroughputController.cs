@@ -11,6 +11,7 @@ namespace MqttRelayService.Utilities
     {
         private readonly object _lock = new();
         private readonly object _rateLock = new();
+        private readonly int _maxConcurrencyHardLimit;
 
         private bool _isPaused;
         private int _maxMessagesPerSecond = 0;
@@ -23,8 +24,21 @@ namespace MqttRelayService.Utilities
         private double _tokens = 0;
         private DateTime _lastRefill = DateTime.Now;
 
+        /// <summary>
+        /// 使用默认并发上限 50 构造。
+        /// </summary>
         public ThroughputController()
+            : this(50)
         {
+        }
+
+        /// <summary>
+        /// 使用指定的最大并发硬上限构造。
+        /// </summary>
+        /// <param name="maxConcurrencyHardLimit">并发度硬上限，不小于 1</param>
+        public ThroughputController(int maxConcurrencyHardLimit)
+        {
+            _maxConcurrencyHardLimit = Math.Max(1, maxConcurrencyHardLimit);
             _pauseTcs.TrySetResult();
             _concurrencyTcs.TrySetResult();
         }
@@ -53,6 +67,20 @@ namespace MqttRelayService.Utilities
                 lock (_lock)
                 {
                     return _maxMessagesPerSecond;
+                }
+            }
+        }
+
+        /// <summary>
+        /// 并发度硬上限（构造时设定，不可运行时变更）。
+        /// </summary>
+        public int MaxConcurrencyHardLimit
+        {
+            get
+            {
+                lock (_lock)
+                {
+                    return _maxConcurrencyHardLimit;
                 }
             }
         }
@@ -145,7 +173,7 @@ namespace MqttRelayService.Utilities
             int updated;
             lock (_lock)
             {
-                _maxConcurrency = Math.Clamp(maxConcurrency, 1, 50);
+                _maxConcurrency = Math.Clamp(maxConcurrency, 1, _maxConcurrencyHardLimit);
                 updated = _maxConcurrency;
                 var oldTcs = _concurrencyTcs;
                 _concurrencyTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

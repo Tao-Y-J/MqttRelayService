@@ -370,3 +370,5 @@ FodyWeavers.xsd
 
 # MQTT Relay Service Runtime Data
 src/MqttRelayService/data/
+/.reasonix
+/.codegraph

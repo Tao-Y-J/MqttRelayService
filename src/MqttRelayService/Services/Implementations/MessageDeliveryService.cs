@@ -14,6 +14,12 @@ namespace MqttRelayService.Services.Implementations
         private const int ConsumerShutdownWaitTimeoutMs = 2000;
         private const int RetrySettlementWaitTimeoutMs = 2000;
 
+        /// <summary>
+        /// 停机/异常恢复路径中 EnqueueAsync、MoveToDeadLetterAsync 等操作的强制超时，
+        /// 防止队列满载时使用 CancellationToken.None 导致无限阻塞挂死停机流程。
+        /// </summary>
+        private const int ShutdownForceTimeoutMs = 5000;
+
         private readonly IMessageQueue _queue;
         private readonly IMessageRouter _router;
         private readonly IMqttBrokerHost _brokerHost;
@@ -289,6 +295,14 @@ namespace MqttRelayService.Services.Implementations
         }
 
         /// <summary>
+        /// 创建停机/异常恢复路径中使用的强制超时 Token，防止队列满载时无限阻塞。
+        /// </summary>
+        private static CancellationToken CreateShutdownForceToken()
+        {
+            return new CancellationTokenSource(ShutdownForceTimeoutMs).Token;
+        }
+
+        /// <summary>
         /// 后台消费循环（使用 ChannelReader.ReadAllAsync 异步挂起等待）
         /// </summary>
         private async Task ConsumeLoopAsync(CancellationToken cancellationToken)
@@ -361,7 +375,7 @@ namespace MqttRelayService.Services.Implementations
                     message.RouteContext.MessageId);
             }
 
-            await MoveToDeadLetterAsync(message, "服务停止时无法保留在途消息", CancellationToken.None);
+            await MoveToDeadLetterAsync(message, "服务停止时无法保留在途消息", CreateShutdownForceToken());
         }
 
         /// <summary>
@@ -620,12 +634,12 @@ namespace MqttRelayService.Services.Implementations
 
                 message.RetryCount = retryCountAfterDelay;
 
-                var enqueued = await _queue.EnqueueAsync(message, CancellationToken.None);
+                var enqueued = await _queue.EnqueueAsync(message, CreateShutdownForceToken());
                 if (!enqueued)
                 {
                     _logger.LogError("消息 {MessageId} 在停止排空阶段重试入队失败，直接进入死信",
                         message.RouteContext.MessageId);
-                    await MoveToDeadLetterAsync(message, "停止排空阶段重试入队失败：" + reason, CancellationToken.None);
+                    await MoveToDeadLetterAsync(message, "停止排空阶段重试入队失败：" + reason, CreateShutdownForceToken());
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -643,13 +657,13 @@ namespace MqttRelayService.Services.Implementations
         {
             try
             {
-                var preserved = await _queue.EnqueueAsync(message, CancellationToken.None);
+                var preserved = await _queue.EnqueueAsync(message, CreateShutdownForceToken());
                 if (preserved)
                 {
                     return;
                 }
 
-                await MoveToDeadLetterAsync(message, reason, CancellationToken.None);
+                await MoveToDeadLetterAsync(message, reason, CreateShutdownForceToken());
             }
             catch (Exception ex)
             {
@@ -657,7 +671,7 @@ namespace MqttRelayService.Services.Implementations
                     message.RouteContext.MessageId);
                 try
                 {
-                    await MoveToDeadLetterAsync(message, "服务停止时保留消息异常：" + reason, CancellationToken.None);
+                    await MoveToDeadLetterAsync(message, "服务停止时保留消息异常：" + reason, CreateShutdownForceToken());
                 }
                 catch (Exception writeEx)
                 {

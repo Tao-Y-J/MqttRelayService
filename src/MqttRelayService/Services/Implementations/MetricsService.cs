@@ -24,7 +24,7 @@ namespace MqttRelayService.Services.Implementations
         private const int AuditFlushBatchSize = 1000;
         private static readonly TimeSpan AuditFlushCoalesceDelay = TimeSpan.FromMilliseconds(50);
 
-        private readonly InMemoryMessageQueue _queue;
+        private readonly IMessageQueue _queue;
         private readonly IClientRegistry _clientRegistry;
         private readonly ServiceOptions _serviceOptions;
         private readonly MqttOptions _mqttOptions;
@@ -77,7 +77,7 @@ namespace MqttRelayService.Services.Implementations
         /// 兼容旧版本的构造函数，主要用于测试
         /// </summary>
         public MetricsService(
-            InMemoryMessageQueue queue,
+            IMessageQueue queue,
             IClientRegistry clientRegistry,
             IOptions<ServiceOptions> serviceOptions,
             IOptions<MqttOptions> mqttOptions,
@@ -91,7 +91,7 @@ namespace MqttRelayService.Services.Implementations
         /// 构造指标统计与收集服务
         /// </summary>
         public MetricsService(
-            InMemoryMessageQueue queue,
+            IMessageQueue queue,
             IClientRegistry clientRegistry,
             IOptions<ServiceOptions> serviceOptions,
             IOptions<MqttOptions> mqttOptions,
