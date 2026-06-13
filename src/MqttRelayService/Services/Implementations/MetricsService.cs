@@ -38,6 +38,7 @@ namespace MqttRelayService.Services.Implementations
         private readonly SemaphoreSlim _dashboardBaselineLock = new(1, 1);
         private readonly Task? _auditWriterTask;
         private int _auditFlushRequested;
+        private int _disposed;
         private bool _dashboardBaselineInitialized;
         private long _dashboardBaselineReceived;
         private long _dashboardBaselineSucceeded;
@@ -295,8 +296,10 @@ namespace MqttRelayService.Services.Implementations
                 return;
             }
 
-            // 防止 DB 持续故障时待写队列无限增长
-            if (_pendingMessageAudits.Count >= MaxPendingAudits)
+            var alreadyPending = _pendingMessageAudits.ContainsKey(record.MessageId);
+
+            // 防止 DB 持续故障时待写队列无限增长；已存在消息允许继续覆盖到最终态
+            if (!alreadyPending && _pendingMessageAudits.Count >= MaxPendingAudits)
             {
                 _logger.LogWarning(
                     "审计待写队列已达上限 {MaxPendingAudits} 条，丢弃消息 {MessageId} 的审计记录",
@@ -311,7 +314,7 @@ namespace MqttRelayService.Services.Implementations
 
             if (Interlocked.Exchange(ref _auditFlushRequested, 1) == 0)
             {
-                _pendingAuditSignal.Release();
+                SafeReleasePendingAuditSignal();
             }
         }
 
@@ -447,6 +450,22 @@ namespace MqttRelayService.Services.Implementations
                 {
                     EnqueueMessageAudit(record);
                 }
+            }
+        }
+
+        private void SafeReleasePendingAuditSignal()
+        {
+            try
+            {
+                _pendingAuditSignal.Release();
+            }
+            catch (ObjectDisposedException)
+            {
+                // Dispose 期间允许后台 writer 自然退出，无需再次唤醒。
+            }
+            catch (SemaphoreFullException)
+            {
+                // 已有待处理唤醒信号，无需重复累加。
             }
         }
 
@@ -827,10 +846,27 @@ namespace MqttRelayService.Services.Implementations
 
         public void Dispose()
         {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
             _snapshotTimer.Dispose();
             _auditWriterCts.Cancel();
-            _pendingAuditSignal.Dispose();
-            _auditWriterCts.Dispose();
+            SafeReleasePendingAuditSignal();
+
+            try
+            {
+                _auditWriterTask?.GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            finally
+            {
+                _pendingAuditSignal.Dispose();
+                _auditWriterCts.Dispose();
+            }
         }
     }
 

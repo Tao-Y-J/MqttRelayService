@@ -1,5 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -715,6 +717,165 @@ namespace MqttRelayService.Tests
         }
 
         [Fact]
+        public async Task MetricsService_WhenPendingAuditQueueIsFull_ShouldStillUpdateExistingMessageToTerminalState()
+        {
+            var writeStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var allowWriteToFinish = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            _mockAuditRepository
+                .Setup(r => r.RecordMessageAuditsAsync(It.IsAny<IReadOnlyList<MessageAuditRecord>>()))
+                .Returns<IReadOnlyList<MessageAuditRecord>>(async records =>
+                {
+                    if (records.Any(r => r.MessageId == "full_queue_existing_msg"))
+                    {
+                        writeStarted.TrySetResult(true);
+                        await allowWriteToFinish.Task;
+                    }
+                });
+
+            using var metricsService = new MetricsService(
+                _queue,
+                _mockClientRegistry.Object,
+                _serviceOptions,
+                _mqttOptions,
+                _reliabilityOptions,
+                _mockAuditRepository.Object,
+                _mockLogger.Object);
+
+            var pending = GetPendingAudits(metricsService);
+            var createdAt = DateTime.Now.AddSeconds(-5);
+            pending["full_queue_existing_msg"] = new MessageAuditRecord
+            {
+                MessageId = "full_queue_existing_msg",
+                Topic = "queued/topic",
+                SourceClientId = "queued_client",
+                Payload = "queued-payload",
+                Status = "Queued",
+                CreatedAt = createdAt,
+                UpdatedAt = createdAt
+            };
+
+            for (int i = 0; i < 49999; i++)
+            {
+                pending.TryAdd(
+                    $"prefill_{i:D5}",
+                    new MessageAuditRecord
+                    {
+                        MessageId = $"prefill_{i:D5}",
+                        Topic = "prefill/topic",
+                        SourceClientId = "prefill_client",
+                        Status = "Queued",
+                        CreatedAt = DateTime.Now,
+                        UpdatedAt = DateTime.Now
+                    });
+            }
+
+            Assert.Equal(50000, pending.Count);
+
+            var existingContext = new RouteContext
+            {
+                MessageId = "full_queue_existing_msg",
+                Topic = "updated/topic",
+                Payload = new byte[] { 1, 2, 3 },
+                QoS = 1,
+                Retain = false,
+                SourceClientId = "updated_client",
+                Timestamp = createdAt
+            };
+
+            metricsService.RecordForwarded(existingContext, success: true, retryCount: 2, latencyMs: 12.5, isSubscriberHit: true);
+            Assert.True(pending.TryGetValue("full_queue_existing_msg", out var updatedExisting));
+            Assert.NotNull(updatedExisting);
+            Assert.Equal("Succeeded", updatedExisting!.Status);
+            Assert.Equal("updated/topic", updatedExisting.Topic);
+            Assert.Equal("updated_client", updatedExisting.SourceClientId);
+            Assert.Equal(2, updatedExisting.RetryCount);
+            Assert.True(updatedExisting.IsSubscriberHit);
+
+            var newContext = new RouteContext
+            {
+                MessageId = "full_queue_new_msg",
+                Topic = "new/topic",
+                Payload = new byte[] { 4, 5, 6 },
+                QoS = 0,
+                Retain = false,
+                SourceClientId = "new_client",
+                Timestamp = DateTime.Now
+            };
+
+            metricsService.RecordForwarded(newContext, success: false, retryCount: 0, latencyMs: 8.1);
+
+            Assert.False(pending.ContainsKey("full_queue_new_msg"));
+
+            var started = await Task.WhenAny(writeStarted.Task, Task.Delay(TimeSpan.FromSeconds(2)));
+            Assert.Same(writeStarted.Task, started);
+            allowWriteToFinish.TrySetResult(true);
+        }
+
+        [Fact]
+        public async Task MetricsService_Dispose_ShouldWaitForAuditWriterToFlushPendingAudits()
+        {
+            var firstWriteStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var allowWriteToFinish = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var persistedBeforeDisposeReturns = false;
+
+            _mockAuditRepository
+                .Setup(r => r.RecordMessageAuditsAsync(It.IsAny<IReadOnlyList<MessageAuditRecord>>()))
+                .Returns<IReadOnlyList<MessageAuditRecord>>(async records =>
+                {
+                    if (records.Any(r => r.MessageId == "dispose_flush_msg"))
+                    {
+                        firstWriteStarted.TrySetResult(true);
+                        await allowWriteToFinish.Task;
+                        persistedBeforeDisposeReturns = true;
+                    }
+
+                    return;
+                });
+
+            var metricsService = new MetricsService(
+                _queue,
+                _mockClientRegistry.Object,
+                _serviceOptions,
+                _mqttOptions,
+                _reliabilityOptions,
+                _mockAuditRepository.Object,
+                _mockLogger.Object);
+
+            var message = new ForwardMessage
+            {
+                MessageId = "dispose_flush_msg",
+                RouteContext = new RouteContext
+                {
+                    MessageId = "dispose_flush_msg",
+                    Topic = "dispose/topic",
+                    Payload = new byte[] { 7, 8, 9 },
+                    QoS = 1,
+                    Retain = false,
+                    SourceClientId = "dispose_client",
+                    Timestamp = DateTime.Now
+                }
+            };
+
+            metricsService.RecordReceived(message);
+
+            var started = await Task.WhenAny(firstWriteStarted.Task, Task.Delay(TimeSpan.FromSeconds(2)));
+            Assert.Same(firstWriteStarted.Task, started);
+
+            var disposeTask = Task.Run(() => metricsService.Dispose());
+            await Task.Delay(100);
+            Assert.False(disposeTask.IsCompleted);
+
+            allowWriteToFinish.TrySetResult(true);
+            await disposeTask;
+
+            Assert.True(persistedBeforeDisposeReturns);
+            _mockAuditRepository.Verify(r => r.RecordMessageAuditsAsync(
+                It.Is<IReadOnlyList<MessageAuditRecord>>(records => records.Any(x => x.MessageId == "dispose_flush_msg"))),
+                Times.AtLeastOnce);
+        }
+
+        [Fact]
         public async Task MetricsMessageQueue_EnqueueAsync_ShouldInterceptAndRecordMetrics()
         {
             // Arrange
@@ -819,6 +980,13 @@ namespace MqttRelayService.Tests
             // Assert
             mockDeadLetter.Verify(d => d.WriteAsync(record, It.IsAny<CancellationToken>()), Times.Once);
             mockMetrics.Verify(m => m.RecordDeadLetter(record), Times.Once);
+        }
+
+        private static ConcurrentDictionary<string, MessageAuditRecord> GetPendingAudits(MetricsService metricsService)
+        {
+            var pendingField = typeof(MetricsService).GetField("_pendingMessageAudits", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.NotNull(pendingField);
+            return Assert.IsType<ConcurrentDictionary<string, MessageAuditRecord>>(pendingField!.GetValue(metricsService));
         }
     }
 }
