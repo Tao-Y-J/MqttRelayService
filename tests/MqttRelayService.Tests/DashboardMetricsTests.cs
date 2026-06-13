@@ -717,6 +717,59 @@ namespace MqttRelayService.Tests
         }
 
         [Fact]
+        public async Task MetricsMessageQueue_EnqueueAsync_InvalidUtf8Payload_ShouldPersistBinaryHexPreview()
+        {
+            var persistedQueued = new TaskCompletionSource<MessageAuditRecord>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            _mockAuditRepository
+                .Setup(r => r.RecordMessageAuditsAsync(It.IsAny<IReadOnlyList<MessageAuditRecord>>()))
+                .Callback<IReadOnlyList<MessageAuditRecord>>(records =>
+                {
+                    var record = records.SingleOrDefault(r => r.MessageId == "invalid_utf8_payload_msg" && r.Status == "Queued");
+                    if (record != null)
+                    {
+                        persistedQueued.TrySetResult(record);
+                    }
+                })
+                .Returns(Task.CompletedTask);
+
+            using var metricsService = new MetricsService(
+                _queue,
+                _mockClientRegistry.Object,
+                _serviceOptions,
+                _mqttOptions,
+                _reliabilityOptions,
+                _mockAuditRepository.Object,
+                _mockLogger.Object);
+
+            var queue = new MetricsMessageQueue(_queue, metricsService);
+            var message = new ForwardMessage
+            {
+                MessageId = "invalid_utf8_payload_msg",
+                RouteContext = new RouteContext
+                {
+                    MessageId = "invalid_utf8_payload_msg",
+                    Topic = "binary/invalid-utf8",
+                    Payload = new byte[] { 0xC3, 0x28, 0x41, 0x42 },
+                    QoS = 0,
+                    Retain = false,
+                    SourceClientId = "binary_client",
+                    Timestamp = DateTime.Now
+                }
+            };
+
+            Assert.True(await queue.EnqueueAsync(message));
+
+            var completed = await Task.WhenAny(persistedQueued.Task, Task.Delay(TimeSpan.FromSeconds(2)));
+            Assert.Same(persistedQueued.Task, completed);
+
+            var persisted = await persistedQueued.Task;
+            Assert.StartsWith("[二进制载荷，大小:", persisted.Payload);
+            Assert.Contains("HEX: C3284142", persisted.Payload);
+            Assert.DoesNotContain("\uFFFD", persisted.Payload);
+        }
+
+        [Fact]
         public async Task MetricsService_WhenPendingAuditQueueIsFull_ShouldStillUpdateExistingMessageToTerminalState()
         {
             var writeStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);

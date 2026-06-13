@@ -24,6 +24,7 @@ namespace MqttRelayService.Services.Implementations
         private const int AuditFlushBatchSize = 1000;
         private const int MaxPendingAudits = 50000; // 审计待写队列上限，防止 DB 故障时内存无限增长
         private static readonly TimeSpan AuditFlushCoalesceDelay = TimeSpan.FromMilliseconds(50);
+        private static readonly System.Text.UTF8Encoding StrictUtf8Encoding = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
         private readonly IMessageQueue _queue;
         private readonly IClientRegistry _clientRegistry;
@@ -519,7 +520,7 @@ namespace MqttRelayService.Services.Implementations
 
             try
             {
-                var utf8Text = System.Text.Encoding.UTF8.GetString(previewBytes);
+                var utf8Text = DecodeUtf8Preview(previewBytes, truncated);
                 if (utf8Text.Any(ch => char.IsControl(ch) && ch != '\r' && ch != '\n' && ch != '\t'))
                 {
                     return false;
@@ -534,6 +535,25 @@ namespace MqttRelayService.Services.Implementations
             {
                 return false;
             }
+        }
+
+        private static string DecodeUtf8Preview(byte[] previewBytes, bool truncated)
+        {
+            var trimBudget = truncated ? 3 : 0;
+
+            for (var trimLength = 0; trimLength < trimBudget; trimLength++)
+            {
+                try
+                {
+                    return StrictUtf8Encoding.GetString(previewBytes, 0, previewBytes.Length - trimLength);
+                }
+                catch (System.Text.DecoderFallbackException)
+                {
+                    // 预览窗口可能截断在多字节 UTF-8 字符中间，允许向前收敛到完整字符边界。
+                }
+            }
+
+            return StrictUtf8Encoding.GetString(previewBytes, 0, previewBytes.Length - trimBudget);
         }
 
         /// <summary>
