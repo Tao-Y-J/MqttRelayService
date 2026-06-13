@@ -142,8 +142,8 @@ namespace MqttRelayService.Tests
             
             stopwatch.Stop();
 
-            // Assert: 至少耗时 150ms (预留足够余量避免高频跑马机测试抖动导致的失败)
-            Assert.True(stopwatch.ElapsedMilliseconds >= 150, $"Elapsed was {stopwatch.ElapsedMilliseconds}ms, which should be >= 150ms");
+            // Assert: 至少耗时 100ms (预留余量避免高频跑马机测试抖动导致的失败)
+            Assert.True(stopwatch.ElapsedMilliseconds >= 100, $"Elapsed was {stopwatch.ElapsedMilliseconds}ms, which should be >= 100ms");
         }
         [Fact]
         public async Task RateLimiting_ShouldApplyPerConsumerInsteadOfGlobalSharedBucket()

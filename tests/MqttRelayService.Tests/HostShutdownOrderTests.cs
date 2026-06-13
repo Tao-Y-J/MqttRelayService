@@ -26,9 +26,9 @@ namespace MqttRelayService.Tests
             Assert.Equal(
                 new[]
                 {
-                    typeof(QueueMetricsWorker),
+                    typeof(BrokerWorker),
                     typeof(DeliveryWorker),
-                    typeof(BrokerWorker)
+                    typeof(QueueMetricsWorker)
                 },
                 hostedServiceTypes);
         }

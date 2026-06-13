@@ -286,7 +286,8 @@ namespace MqttRelayService.Services.Implementations
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "拦截客户端 {ClientId} 发布消息时发生异常", e.ClientId);
+                // 保持 ProcessPublish = false，宁可丢消息也不让消息绕过内部管道（审计/重试/死信）
+                _logger.LogError(ex, "拦截客户端 {ClientId} 发布消息时发生异常，消息已丢弃", e.ClientId);
             }
         }
 

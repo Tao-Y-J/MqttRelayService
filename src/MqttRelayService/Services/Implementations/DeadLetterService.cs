@@ -13,6 +13,8 @@ namespace MqttRelayService.Services.Implementations
     {
         private readonly ReliabilityOptions _options;
         private readonly ILogger<DeadLetterService> _logger;
+        private string _lastDateDir = string.Empty;
+        private readonly object _dirLock = new();
 
         public DeadLetterService(IOptions<ReliabilityOptions> options, ILogger<DeadLetterService> logger)
         {
@@ -36,10 +38,7 @@ namespace MqttRelayService.Services.Implementations
                 var deadLetterDir = Path.Combine(AppContext.BaseDirectory, _options.DeadLetterPath);
                 var dateDir = Path.Combine(deadLetterDir, DateTime.Now.ToString("yyyyMMdd"));
 
-                if (!Directory.Exists(dateDir))
-                {
-                    Directory.CreateDirectory(dateDir);
-                }
+                EnsureDirectory(dateDir);
 
                 var filePath = Path.Combine(dateDir, $"{record.MessageId}.json");
                 var json = JsonSerializer.Serialize(record, new JsonSerializerOptions
@@ -60,6 +59,25 @@ namespace MqttRelayService.Services.Implementations
             {
                 _logger.LogError(ex, "写入死信记录失败，消息 {MessageId}", record.MessageId);
                 throw;
+            }
+        }
+
+        private void EnsureDirectory(string dateDir)
+        {
+            if (string.Equals(_lastDateDir, dateDir, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            lock (_dirLock)
+            {
+                if (string.Equals(_lastDateDir, dateDir, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                Directory.CreateDirectory(dateDir);
+                _lastDateDir = dateDir;
             }
         }
     }

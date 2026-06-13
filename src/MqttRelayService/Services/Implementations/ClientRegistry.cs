@@ -110,10 +110,16 @@ namespace MqttRelayService.Services.Implementations
         {
             try
             {
-                if (_sessions.TryGetValue(clientId, out var session))
+                while (_sessions.TryGetValue(clientId, out var session))
                 {
                     lock (session)
                     {
+                        // 防止 RegisterAsync 在 TryGetValue 和 lock 之间替换了会话对象
+                        if (!_sessions.TryGetValue(clientId, out var current) || current != session)
+                        {
+                            continue;
+                        }
+
                         if (isSubscribed)
                         {
                             session.Subscriptions.Add(topic);
@@ -125,6 +131,7 @@ namespace MqttRelayService.Services.Implementations
                             _logger.LogDebug("客户端 {ClientId} 取消订阅主题 {Topic}", clientId, topic);
                         }
                     }
+                    break;
                 }
             }
             catch (Exception ex)
@@ -140,12 +147,18 @@ namespace MqttRelayService.Services.Implementations
         /// </summary>
         public Task UpdateActivityAsync(string clientId, CancellationToken cancellationToken = default)
         {
-            if (_sessions.TryGetValue(clientId, out var session))
+            while (_sessions.TryGetValue(clientId, out var session))
             {
                 lock (session)
                 {
+                    if (!_sessions.TryGetValue(clientId, out var current) || current != session)
+                    {
+                        continue;
+                    }
+
                     session.LastActivityAt = DateTime.Now;
                 }
+                break;
             }
 
             return Task.CompletedTask;

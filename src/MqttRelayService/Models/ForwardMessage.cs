@@ -8,7 +8,7 @@ namespace MqttRelayService.Models
         /// <summary>
         /// 消息唯一标识
         /// </summary>
-        public string MessageId { get; set; } = Guid.NewGuid().ToString("N");
+        public string MessageId { get; set; } = string.Empty;
 
         /// <summary>
         /// 路由上下文

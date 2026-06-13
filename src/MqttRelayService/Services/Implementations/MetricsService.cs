@@ -22,6 +22,7 @@ namespace MqttRelayService.Services.Implementations
         private const int MaxLogCount = 100;
         private const int MaxHistorySnapshots = 60; // 2秒一次，保存120秒（2分钟）的历史
         private const int AuditFlushBatchSize = 1000;
+        private const int MaxPendingAudits = 50000; // 审计待写队列上限，防止 DB 故障时内存无限增长
         private static readonly TimeSpan AuditFlushCoalesceDelay = TimeSpan.FromMilliseconds(50);
 
         private readonly IMessageQueue _queue;
@@ -291,6 +292,15 @@ namespace MqttRelayService.Services.Implementations
         {
             if (_auditRepository == null || string.IsNullOrEmpty(record.MessageId))
             {
+                return;
+            }
+
+            // 防止 DB 持续故障时待写队列无限增长
+            if (_pendingMessageAudits.Count >= MaxPendingAudits)
+            {
+                _logger.LogWarning(
+                    "审计待写队列已达上限 {MaxPendingAudits} 条，丢弃消息 {MessageId} 的审计记录",
+                    MaxPendingAudits, record.MessageId);
                 return;
             }
 
@@ -819,20 +829,8 @@ namespace MqttRelayService.Services.Implementations
         {
             _snapshotTimer.Dispose();
             _auditWriterCts.Cancel();
-            _pendingAuditSignal.Release();
-
-            try
-            {
-                _auditWriterTask?.GetAwaiter().GetResult();
-            }
-            catch (OperationCanceledException)
-            {
-            }
-            finally
-            {
-                _auditWriterCts.Dispose();
-                _pendingAuditSignal.Dispose();
-            }
+            _pendingAuditSignal.Dispose();
+            _auditWriterCts.Dispose();
         }
     }
 
