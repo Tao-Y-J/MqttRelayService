@@ -46,7 +46,7 @@ namespace MqttRelayService.Services.Implementations
         /// <summary>
         /// 历史峰值长度
         /// </summary>
-        public int PeakCount => _peakCount;
+        public int PeakCount => Volatile.Read(ref _peakCount);
 
         /// <summary>
         /// 将消息入队
@@ -76,12 +76,15 @@ namespace MqttRelayService.Services.Implementations
                     await _channel.Writer.WriteAsync(message, linkedCts.Token);
                 }
 
-                // 更新峰值
+                // 更新峰值，使用 CAS 循环保证高并发下峰值只升不降
                 var currentCount = Count;
-                if (currentCount > _peakCount)
+                int initialPeak;
+                do
                 {
-                    Interlocked.Exchange(ref _peakCount, currentCount);
-                }
+                    initialPeak = Volatile.Read(ref _peakCount);
+                    if (currentCount <= initialPeak)
+                        break;
+                } while (Interlocked.CompareExchange(ref _peakCount, currentCount, initialPeak) != initialPeak);
 
                 _logger.LogDebug("消息 {MessageId} 已入队，当前队列长度 {Count}", message.MessageId, currentCount);
                 return true;
