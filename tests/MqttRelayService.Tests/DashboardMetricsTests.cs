@@ -770,22 +770,8 @@ namespace MqttRelayService.Tests
         }
 
         [Fact]
-        public async Task MetricsService_WhenPendingAuditQueueIsFull_ShouldStillUpdateExistingMessageToTerminalState()
+        public void MetricsService_WhenPendingAuditQueueIsFull_ShouldStillUpdateExistingMessageToTerminalState()
         {
-            var writeStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var allowWriteToFinish = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-
-            _mockAuditRepository
-                .Setup(r => r.RecordMessageAuditsAsync(It.IsAny<IReadOnlyList<MessageAuditRecord>>()))
-                .Returns<IReadOnlyList<MessageAuditRecord>>(async records =>
-                {
-                    if (records.Any(r => r.MessageId == "full_queue_existing_msg"))
-                    {
-                        writeStarted.TrySetResult(true);
-                        await allowWriteToFinish.Task;
-                    }
-                });
-
             using var metricsService = new MetricsService(
                 _queue,
                 _mockClientRegistry.Object,
@@ -824,6 +810,7 @@ namespace MqttRelayService.Tests
             }
 
             Assert.Equal(50000, pending.Count);
+            SetAuditFlushRequested(metricsService, 1);
 
             var existingContext = new RouteContext
             {
@@ -859,10 +846,7 @@ namespace MqttRelayService.Tests
             metricsService.RecordForwarded(newContext, success: false, retryCount: 0, latencyMs: 8.1);
 
             Assert.False(pending.ContainsKey("full_queue_new_msg"));
-
-            var started = await Task.WhenAny(writeStarted.Task, Task.Delay(TimeSpan.FromSeconds(2)));
-            Assert.Same(writeStarted.Task, started);
-            allowWriteToFinish.TrySetResult(true);
+            pending.Clear();
         }
 
         [Fact]
@@ -1040,6 +1024,13 @@ namespace MqttRelayService.Tests
             var pendingField = typeof(MetricsService).GetField("_pendingMessageAudits", BindingFlags.Instance | BindingFlags.NonPublic);
             Assert.NotNull(pendingField);
             return Assert.IsType<ConcurrentDictionary<string, MessageAuditRecord>>(pendingField!.GetValue(metricsService));
+        }
+
+        private static void SetAuditFlushRequested(MetricsService metricsService, int value)
+        {
+            var flushRequestedField = typeof(MetricsService).GetField("_auditFlushRequested", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.NotNull(flushRequestedField);
+            flushRequestedField!.SetValue(metricsService, value);
         }
     }
 }

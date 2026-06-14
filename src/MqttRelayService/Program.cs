@@ -391,12 +391,11 @@ namespace MqttRelayService
         internal static void RegisterHostedServices(IServiceCollection services)
         {
             // 注意：Host 按注册逆序停止，因此先注册的 Worker 会后停止
-            // DeliveryWorker 必须在 BrokerWorker 之前停止（先排空队列再停 Broker）
-            // 而 BrokerWorker 必须在 QueueMetricsWorker 之前停止
-            // 故逆序停止：QueueMetricsWorker → DeliveryWorker → BrokerWorker
-            services.AddHostedService<BrokerWorker>();
-            services.AddHostedService<DeliveryWorker>();
+            // BrokerWorker 必须先停止，阻断新的 MQTT 发布入口
+            // DeliveryWorker 随后停止并排空队列，避免停机窗口内新消息入队后无人消费
             services.AddHostedService<QueueMetricsWorker>();
+            services.AddHostedService<DeliveryWorker>();
+            services.AddHostedService<BrokerWorker>();
         }
     }
 
