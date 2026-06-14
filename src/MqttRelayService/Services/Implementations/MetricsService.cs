@@ -36,10 +36,12 @@ namespace MqttRelayService.Services.Implementations
         private readonly CancellationTokenSource _auditWriterCts = new();
         private readonly ConcurrentDictionary<string, MessageAuditRecord> _pendingMessageAudits = new();
         private readonly SemaphoreSlim _pendingAuditSignal = new(0);
+        private static readonly TimeSpan MaxAuditWriteBackoffDelay = TimeSpan.FromSeconds(30);
         private readonly SemaphoreSlim _dashboardBaselineLock = new(1, 1);
         private readonly Task? _auditWriterTask;
         private int _auditFlushRequested;
         private int _disposed;
+        private int _auditWriteFailureCount;
         private bool _dashboardBaselineInitialized;
         private long _dashboardBaselineReceived;
         private long _dashboardBaselineSucceeded;
@@ -337,6 +339,8 @@ namespace MqttRelayService.Services.Implementations
                     await Task.Delay(AuditFlushCoalesceDelay, _auditWriterCts.Token);
                     Interlocked.Exchange(ref _auditFlushRequested, 0);
                     await FlushPendingAuditsAsync();
+                    // 本轮刷新成功，重置连续失败计数
+                    _auditWriteFailureCount = 0;
                 }
                 catch (OperationCanceledException) when (_auditWriterCts.IsCancellationRequested)
                 {
@@ -344,7 +348,18 @@ namespace MqttRelayService.Services.Implementations
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "后台审计日志写入循环发生未捕获致命异常");
+                    _auditWriteFailureCount++;
+                    var backoff = ComputeAuditWriteBackoffDelay();
+                    _logger.LogError(ex, "后台审计日志批量写入失败（连续失败 {FailureCount} 次），将在 {BackoffMs}ms 后退避重试",
+                        _auditWriteFailureCount, (int)backoff.TotalMilliseconds);
+                    try
+                    {
+                        await Task.Delay(backoff, _auditWriterCts.Token);
+                    }
+                    catch (OperationCanceledException) when (_auditWriterCts.IsCancellationRequested)
+                    {
+                        break;
+                    }
                 }
             }
 
@@ -358,6 +373,10 @@ namespace MqttRelayService.Services.Implementations
             }
         }
 
+        /// <summary>
+        /// 排空审计待写队列。若写入失败，将失败 batch 通过优先路径回填并向上抛出异常，
+        /// 由上层 ProcessPendingAuditsAsync 执行退避重试。
+        /// </summary>
         private async Task FlushPendingAuditsAsync()
         {
             if (_auditRepository == null)
@@ -386,19 +405,39 @@ namespace MqttRelayService.Services.Implementations
 
                     if (batch.Count >= AuditFlushBatchSize)
                     {
-                        await WriteAuditBatchOrRequeueAsync(batch);
+                        await TryWriteBatchOrRequeueAsync(batch);
                         batch.Clear();
                     }
                 }
 
                 if (batch.Count > 0)
                 {
-                    await WriteAuditBatchOrRequeueAsync(batch);
+                    await TryWriteBatchOrRequeueAsync(batch);
                     batch.Clear();
                 }
 
                 // 每次刷完一轮后，进行短暂的 Yield 释放 CPU 占用，防止高吞吐下完全堵死其他线程的数据库查询
                 await Task.Yield();
+            }
+        }
+
+        /// <summary>
+        /// 尝试写入一个审计批次；失败时将批次内记录通过优先路径回填，并向上抛出异常。
+        /// </summary>
+        private async Task TryWriteBatchOrRequeueAsync(List<MessageAuditRecord> batch)
+        {
+            try
+            {
+                await WriteAuditBatchOrRequeueAsync(batch);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "后台批量写入 {Count} 条消息审计记录失败，已将记录重新入队", batch.Count);
+                foreach (var record in batch)
+                {
+                    RequeueFailedAuditRecord(record);
+                }
+                throw;
             }
         }
 
@@ -433,6 +472,10 @@ namespace MqttRelayService.Services.Implementations
             }
         }
 
+        /// <summary>
+        /// 将审计批次写入仓储。写入失败时不在此层捕获——异常向上传播，
+        /// 由 FlushPendingAuditsAsync 统一处理失败 batch 回填，并由 ProcessPendingAuditsAsync 执行退避。
+        /// </summary>
         private async Task WriteAuditBatchOrRequeueAsync(IReadOnlyCollection<MessageAuditRecord> batch)
         {
             if (_auditRepository == null || batch.Count == 0)
@@ -440,17 +483,41 @@ namespace MqttRelayService.Services.Implementations
                 return;
             }
 
-            try
+            await _auditRepository.RecordMessageAuditsAsync(batch.ToList());
+        }
+
+        /// <summary>
+        /// 计算审计写入连续失败后的退避延迟：1s → 2s → 4s → 8s → 16s → 30s（上限）。
+        /// </summary>
+        private TimeSpan ComputeAuditWriteBackoffDelay()
+        {
+            var seconds = Math.Pow(2, _auditWriteFailureCount - 1);
+            if (seconds > MaxAuditWriteBackoffDelay.TotalSeconds)
             {
-                await _auditRepository.RecordMessageAuditsAsync(batch.ToList());
+                return MaxAuditWriteBackoffDelay;
             }
-            catch (Exception ex)
+            return TimeSpan.FromSeconds(seconds);
+        }
+
+        /// <summary>
+        /// 将写入失败的审计记录回填到待写队列。
+        /// 与正常入队不同：失败回填不受 MaxPendingAudits 上限约束，防止 DB 故障期间最终态被新消息挤掉。
+        /// </summary>
+        private void RequeueFailedAuditRecord(MessageAuditRecord record)
+        {
+            if (_auditRepository == null || string.IsNullOrEmpty(record.MessageId))
             {
-                _logger.LogError(ex, "后台批量写入 {Count} 条消息审计记录时发生异常，已重新并入待写队列", batch.Count);
-                foreach (var record in batch)
-                {
-                    EnqueueMessageAudit(record);
-                }
+                return;
+            }
+
+            _pendingMessageAudits.AddOrUpdate(
+                record.MessageId,
+                record,
+                (_, existing) => MergeAuditRecord(existing, record));
+
+            if (Interlocked.Exchange(ref _auditFlushRequested, 1) == 0)
+            {
+                SafeReleasePendingAuditSignal();
             }
         }
 
