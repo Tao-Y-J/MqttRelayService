@@ -145,18 +145,30 @@ namespace MqttRelayService.Utilities
 
         /// <summary>
         /// 动态更新单线程每秒最大转发量。
+        /// 注意：本方法与 <see cref="ApplyRateLimitingAsync"/> 必须保持一致的加锁顺序（先 _lock 后 _rateLock），
+        /// 避免经典 AB-BA 死锁。_rateLock 区段内只读写本方法已持有的局部快照，不再回调任何持 _lock 的成员。
         /// </summary>
         public void UpdateMaxMessagesPerSecond(int mps)
         {
+            // 锁顺序：_lock → _rateLock（先持 _lock 读取快照，再持 _rateLock 应用）
+            int newMps;
+            int effectiveRate;
             lock (_lock)
             {
                 _maxMessagesPerSecond = Math.Max(0, mps);
+                newMps = _maxMessagesPerSecond;
+                // 在仍持有 _lock 时计算有效速率，避免在 _rateLock 区段内再回调持 _lock 的 GetEffectiveRatePerSecond
+                effectiveRate = ComputeEffectiveRatePerSecond(_maxMessagesPerSecond, _activeCount);
             }
 
             lock (_rateLock)
             {
-                _tokens = GetEffectiveRatePerSecond();
-                _lastRefill = DateTime.Now;
+                // 仅当限流仍启用时重置令牌桶，避免限流被关闭后还残留过期令牌
+                if (newMps > 0)
+                {
+                    _tokens = effectiveRate;
+                    _lastRefill = DateTime.Now;
+                }
             }
         }
 
@@ -248,12 +260,26 @@ namespace MqttRelayService.Utilities
 
         /// <summary>
         /// 以“活动线程数 × 单线程 MPS”作为全局补充速率，保持单线程调控语义。
+        /// 锁顺序：_lock → _rateLock。_rateLock 区段内不回调任何持 _lock 的成员，杜绝 AB-BA 死锁。
         /// </summary>
         private async Task ApplyRateLimitingAsync(CancellationToken cancellationToken)
         {
-            if (MaxMessagesPerSecond <= 0)
+            // 在 _rateLock 之外先用 _lock 读取限流配置快照，避免在持 _rateLock 时再嵌套获取 _lock
+            int maxMessagesPerSecond;
+            int effectiveRate;
+            lock (_lock)
             {
-                return;
+                maxMessagesPerSecond = _maxMessagesPerSecond;
+                if (maxMessagesPerSecond <= 0)
+                {
+                    return;
+                }
+
+                effectiveRate = ComputeEffectiveRatePerSecond(maxMessagesPerSecond, _activeCount);
+                if (effectiveRate <= 0)
+                {
+                    return;
+                }
             }
 
             while (true)
@@ -266,12 +292,6 @@ namespace MqttRelayService.Utilities
                     var now = DateTime.Now;
                     var elapsed = (now - _lastRefill).TotalSeconds;
                     _lastRefill = now;
-
-                    var effectiveRate = GetEffectiveRatePerSecond();
-                    if (effectiveRate <= 0)
-                    {
-                        return;
-                    }
 
                     _tokens += elapsed * effectiveRate;
                     if (_tokens > effectiveRate)
@@ -294,18 +314,21 @@ namespace MqttRelayService.Utilities
             }
         }
 
-        private int GetEffectiveRatePerSecond()
+        /// <summary>
+        /// 根据“单线程 MPS × 活动工作线程数”计算全局有效补充速率。
+        /// 调用方必须已持有 <see cref="_lock"/>；本方法不再自行加锁，确保不会在 _rateLock 区段内嵌套 _lock。
+        /// </summary>
+        /// <param name="maxMessagesPerSecond">单线程每秒最大转发量</param>
+        /// <param name="activeCount">当前活动工作线程数（已持 _lock 读取，保证一致快照）</param>
+        private static int ComputeEffectiveRatePerSecond(int maxMessagesPerSecond, int activeCount)
         {
-            lock (_lock)
+            if (maxMessagesPerSecond <= 0)
             {
-                if (_maxMessagesPerSecond <= 0)
-                {
-                    return 0;
-                }
-
-                var activeWorkers = Math.Max(_activeCount, 1);
-                return _maxMessagesPerSecond * activeWorkers;
+                return 0;
             }
+
+            var activeWorkers = Math.Max(activeCount, 1);
+            return maxMessagesPerSecond * activeWorkers;
         }
     }
 }

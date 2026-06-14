@@ -146,6 +146,70 @@ namespace MqttRelayService.Tests
             Assert.True(stopwatch.ElapsedMilliseconds >= 100, $"Elapsed was {stopwatch.ElapsedMilliseconds}ms, which should be >= 100ms");
         }
         [Fact]
+        public async Task ConcurrentUpdateMpsAndWaitAsync_ShouldNotDeadlockOrCrash()
+        {
+            // 回归测试：ApplyRateLimitingAsync 与 UpdateMaxMessagesPerSecond 必须保持一致的锁顺序，
+            // 否则在高并发下会触发经典 AB-BA 死锁（WaitAsync 持 _rateLock 再要 _lock，
+            // UpdateMps 持 _lock 再要 _rateLock）。此处用并发压测 + 超时断言确保不阻塞、不抛异常。
+            var controller = new ThroughputController();
+            controller.UpdateMaxMessagesPerSecond(100); // 开启限流路径，使 WaitAsync 进入 _rateLock 区段
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            var faults = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+
+            // 写线程：持续变更 MPS，反复触发 _lock → _rateLock 加锁路径
+            var updaterTask = Task.Run(() =>
+            {
+                try
+                {
+                    var rng = new Random(0);
+                    while (!cts.IsCancellationRequested)
+                    {
+                        controller.UpdateMaxMessagesPerSecond(rng.Next(1, 500));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    faults.Enqueue(ex);
+                }
+            });
+
+            // 多个消费线程：持续走 WaitAsync → ApplyRateLimitingAsync 的 _rateLock 路径
+            var consumerTasks = Enumerable.Range(0, 4).Select(_ => Task.Run(async () =>
+            {
+                try
+                {
+                    while (!cts.IsCancellationRequested)
+                    {
+                        try
+                        {
+                            await controller.WaitAsync(cts.Token);
+                        }
+                        catch (OperationCanceledException) when (cts.IsCancellationRequested)
+                        {
+                            break;
+                        }
+                        controller.Release();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    faults.Enqueue(ex);
+                }
+            })).ToArray();
+
+            // 给整体一个硬性超时：若发生死锁，Task.WhenAll 会一直挂起，测试框架无法捕获，
+            // 因此用 Task.WhenAny + 超时来判定死锁。
+            var all = Task.WhenAll(new[] { updaterTask }.Concat(consumerTasks));
+            var completed = await Task.WhenAny(all, Task.Delay(TimeSpan.FromSeconds(5)));
+
+            cts.Cancel();
+
+            Assert.True(completed == all, "并发更新 MPS 与限流等待发生死锁或超时，任务未在 5s 内收敛退出。");
+            Assert.Empty(faults);
+        }
+
+        [Fact]
         public async Task RateLimiting_ShouldApplyPerConsumerInsteadOfGlobalSharedBucket()
         {
             var controller = new ThroughputController();

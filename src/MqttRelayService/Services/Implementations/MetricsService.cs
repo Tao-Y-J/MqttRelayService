@@ -787,28 +787,50 @@ namespace MqttRelayService.Services.Implementations
         }
 
         /// <summary>
-        /// 获取当前所有统计指标的聚合快照，用于 Dashboard 前端展示
+        /// 获取当前所有统计指标的聚合快照，用于 Dashboard 前端展示。
+        /// 该方法是 HTTP 查询入口，必须对任何子调用异常做顶层兜底，避免单次快照失败导致整个 Dashboard 接口 500。
         /// </summary>
         public async Task<object> GetDashboardDataAsync()
         {
-            var activeSessions = await _clientRegistry.GetAllSessionsAsync();
-            var process = Process.GetCurrentProcess();
-
-            // Uptime 格式化
-            var uptime = DateTime.Now - _startTime;
-            var uptimeString = $"{(int)uptime.TotalDays}天 {uptime.Hours:D2}:{uptime.Minutes:D2}:{uptime.Seconds:D2}";
-
-            // 提取在线客户端列表
-            var clients = activeSessions.Select(s => new
+            try
             {
-                s.ClientId,
-                s.Username,
-                s.ConnectionId,
-                ConnectedAt = s.ConnectedAt.ToString("yyyy-MM-dd HH:mm:ss"),
-                LastActivityAt = s.LastActivityAt.ToString("yyyy-MM-dd HH:mm:ss"),
-                Status = s.Status.ToString(),
-                Subscriptions = s.Subscriptions.ToList()
-            }).ToList();
+                // 客户端注册表快照与进程信息都可能因并发或系统原因抛异常，需在此处兜底降级。
+                List<ClientSessionInfo> activeSessions;
+                try
+                {
+                    activeSessions = (await _clientRegistry.GetAllSessionsAsync())?.ToList() ?? new List<ClientSessionInfo>();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "获取在线客户端会话失败，Dashboard 客户端列表降级为空");
+                    activeSessions = new List<ClientSessionInfo>();
+                }
+
+                Process? process = null;
+                try
+                {
+                    process = Process.GetCurrentProcess();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "获取当前进程信息失败，Dashboard 内存用量将缺失");
+                }
+
+                // Uptime 格式化
+                var uptime = DateTime.Now - _startTime;
+                var uptimeString = $"{(int)uptime.TotalDays}天 {uptime.Hours:D2}:{uptime.Minutes:D2}:{uptime.Seconds:D2}";
+
+                // 提取在线客户端列表
+                var clients = activeSessions.Select(s => new
+                {
+                    s.ClientId,
+                    s.Username,
+                    s.ConnectionId,
+                    ConnectedAt = s.ConnectedAt.ToString("yyyy-MM-dd HH:mm:ss"),
+                    LastActivityAt = s.LastActivityAt.ToString("yyyy-MM-dd HH:mm:ss"),
+                    Status = s.Status.ToString(),
+                    Subscriptions = s.Subscriptions.ToList()
+                }).ToList();
 
             // 增量计算吞吐
             List<object> history;
@@ -863,7 +885,7 @@ namespace MqttRelayService.Services.Implementations
                     OsVersion = GetFriendlyOsDescription(),
                     DotNetVersion = RuntimeInformation.FrameworkDescription,
                     CpuThreads = Environment.ProcessorCount,
-                    MemoryUsageMb = Math.Round(process.WorkingSet64 / 1024.0 / 1024.0, 2),
+                    MemoryUsageMb = process != null ? Math.Round(process.WorkingSet64 / 1024.0 / 1024.0, 2) : 0,
                     Timestamp = DateTime.Now.ToString("o")
                 },
                 Counters = new
@@ -881,7 +903,10 @@ namespace MqttRelayService.Services.Implementations
                     Current = _queue.Count,
                     Capacity = _queue.Capacity,
                     Peak = _queue.PeakCount,
-                    CongestionPercentage = Math.Round((double)_queue.Count / _queue.Capacity * 100, 2)
+                    // 容量为 0 时（误配或自定义队列实现）直接按 0 拥挤度返回，避免产生 NaN 污染前端
+                    CongestionPercentage = _queue.Capacity > 0
+                        ? Math.Round((double)_queue.Count / _queue.Capacity * 100, 2)
+                        : 0
                 },
                 Clients = new
                 {
@@ -890,6 +915,62 @@ namespace MqttRelayService.Services.Implementations
                 },
                 History = history,
                 Logs = logs,
+                Configuration = new
+                {
+                    QueueCapacity = _reliabilityOptions.QueueCapacity,
+                    MaxConcurrentHandlers = _reliabilityOptions.MaxConcurrentHandlers,
+                    MaxRetryCount = _reliabilityOptions.MaxRetryCount,
+                    MaxPendingRetryTasks = _reliabilityOptions.MaxPendingRetryTasks,
+                    EnableDeadLetter = _reliabilityOptions.EnableDeadLetter,
+                    DeadLetterPath = _reliabilityOptions.DeadLetterPath
+                }
+            };
+            }
+            catch (Exception ex)
+            {
+                // Dashboard 是观测入口，任何子调用失败都不应让接口 500。
+                // 记录错误后返回最小可用结构，保证前端仍能渲染而不是白屏。
+                _logger.LogError(ex, "生成 Dashboard 数据快照失败，返回降级快照");
+                return BuildDegradedDashboard();
+            }
+        }
+
+        /// <summary>
+        /// 当完整 Dashboard 快照生成失败时返回的最小降级结构，确保前端不会拿到 500 或空响应。
+        /// </summary>
+        private object BuildDegradedDashboard()
+        {
+            var uptime = DateTime.Now - _startTime;
+            var uptimeString = $"{(int)uptime.TotalDays}天 {uptime.Hours:D2}:{uptime.Minutes:D2}:{uptime.Seconds:D2}";
+
+            return new
+            {
+                System = new
+                {
+                    ServiceName = _serviceOptions.Name,
+                    MqttPort = _mqttOptions.TcpPort,
+                    Uptime = uptimeString,
+                    OsVersion = GetFriendlyOsDescription(),
+                    DotNetVersion = RuntimeInformation.FrameworkDescription,
+                    CpuThreads = Environment.ProcessorCount,
+                    MemoryUsageMb = 0,
+                    Timestamp = DateTime.Now.ToString("o"),
+                    Degraded = true
+                },
+                Counters = new
+                {
+                    TotalReceived = Interlocked.Read(ref _totalReceived),
+                    TotalRejected = Interlocked.Read(ref _totalRejected),
+                    TotalPending = 0,
+                    TotalSucceeded = Interlocked.Read(ref _totalSucceeded),
+                    TotalFailed = Interlocked.Read(ref _totalFailed),
+                    TotalDeadLetter = Interlocked.Read(ref _totalDeadLetter),
+                    TotalRetries = Interlocked.Read(ref _totalRetries)
+                },
+                Queue = new { Current = 0, Capacity = _reliabilityOptions.QueueCapacity, Peak = 0, CongestionPercentage = 0 },
+                Clients = new { Count = 0, List = Array.Empty<object>() },
+                History = Array.Empty<object>(),
+                Logs = Array.Empty<object>(),
                 Configuration = new
                 {
                     QueueCapacity = _reliabilityOptions.QueueCapacity,

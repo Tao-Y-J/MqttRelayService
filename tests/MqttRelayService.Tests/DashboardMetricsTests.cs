@@ -1019,6 +1019,55 @@ namespace MqttRelayService.Tests
             mockMetrics.Verify(m => m.RecordDeadLetter(record), Times.Once);
         }
 
+        [Fact]
+        public async Task MetricsService_GetDashboardDataAsync_ZeroCapacityQueue_ShouldNotThrowDivideByZero()
+        {
+            // Arrange：构造一个 Capacity=0 的队列（模拟 QueueCapacity 误配或自定义队列实现）。
+            // 修复前 GetDashboardDataAsync 计算 CongestionPercentage 时会触发 DivideByZeroException
+            // 并让整个 Dashboard 接口 500，且方法体无顶层 try/catch 兜底。
+            var zeroCapacityQueue = new Mock<IMessageQueue>();
+            zeroCapacityQueue.SetupGet(q => q.Capacity).Returns(0);
+            zeroCapacityQueue.SetupGet(q => q.Count).Returns(0);
+            zeroCapacityQueue.SetupGet(q => q.PeakCount).Returns(0);
+
+            using var metricsService = new MetricsService(
+                zeroCapacityQueue.Object,
+                _mockClientRegistry.Object,
+                _serviceOptions,
+                _mqttOptions,
+                _reliabilityOptions,
+                _mockLogger.Object);
+
+            // Act
+            var dashboard = await metricsService.GetDashboardDataAsync();
+
+            // Assert：不抛异常，拥挤度按 0 处理
+            Assert.NotNull(dashboard);
+        }
+
+        [Fact]
+        public async Task MetricsService_GetDashboardDataAsync_ClientRegistryThrows_ShouldNotPropagateException()
+        {
+            // Arrange：客户端注册表在 Dashboard 读取时抛异常（例如并发快照失败）。
+            // 修复前该异常会直接冒泡到 HTTP 调用方导致 500，违反“所有后台/查询入口需有顶层兜底”。
+            _mockClientRegistry.Setup(r => r.GetAllSessionsAsync(It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new InvalidOperationException("registry snapshot failed"));
+
+            using var metricsService = new MetricsService(
+                _queue,
+                _mockClientRegistry.Object,
+                _serviceOptions,
+                _mqttOptions,
+                _reliabilityOptions,
+                _mockLogger.Object);
+
+            // Act
+            var dashboard = await metricsService.GetDashboardDataAsync();
+
+            // Assert：异常被吞掉并降级返回，不冒泡
+            Assert.NotNull(dashboard);
+        }
+
         private static ConcurrentDictionary<string, MessageAuditRecord> GetPendingAudits(MetricsService metricsService)
         {
             var pendingField = typeof(MetricsService).GetField("_pendingMessageAudits", BindingFlags.Instance | BindingFlags.NonPublic);

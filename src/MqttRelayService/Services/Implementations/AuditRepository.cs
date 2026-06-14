@@ -28,7 +28,9 @@ namespace MqttRelayService.Services.Implementations
         private readonly SqlSugarScope _db;
         private readonly string? _sqliteDataSourcePath;
 
-        private bool _schemaEnsured;
+        // 双检锁标志位：读路径（GetPagedMessagesAsync 等不持 _writeLock 的查询）也会读取此标志，
+        // 必须用 volatile 保证跨线程可见性，否则读线程可能看到陈旧的 false 而重复进入 InitTables。
+        private volatile bool _schemaEnsured;
 
         /// <summary>
         /// 正在执行清理的历史状态标志，防止多线程清理任务堆积排队造成线程池饥饿。
