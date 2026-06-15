@@ -42,6 +42,7 @@ namespace MqttRelayService.Services.Implementations
         private int _auditFlushRequested;
         private int _disposed;
         private int _auditWriteFailureCount;
+        private int _pendingAuditOverflowLogged; // 审计队列超限告警去重标志，0=未告警，1=已告警
         private bool _dashboardBaselineInitialized;
         private long _dashboardBaselineReceived;
         private long _dashboardBaselineSucceeded;
@@ -419,6 +420,9 @@ namespace MqttRelayService.Services.Implementations
                 // 每次刷完一轮后，进行短暂的 Yield 释放 CPU 占用，防止高吞吐下完全堵死其他线程的数据库查询
                 await Task.Yield();
             }
+
+            // 队列已排空，重置超限告警标志以便下次 DB 故障时再次触发
+            Interlocked.Exchange(ref _pendingAuditOverflowLogged, 0);
         }
 
         /// <summary>
@@ -432,11 +436,22 @@ namespace MqttRelayService.Services.Implementations
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "后台批量写入 {Count} 条消息审计记录失败，已将记录重新入队", batch.Count);
+                _logger.LogWarning(ex, "后台批量写入 {Count} 条消息审计记录失败，已将记录重新入队", batch.Count);
                 foreach (var record in batch)
                 {
                     RequeueFailedAuditRecord(record);
                 }
+
+                // 失败回填不受 MaxPendingAudits 上限约束，检查待写队列是否超出正常范围
+                var pendingCount = _pendingMessageAudits.Count;
+                if (pendingCount > MaxPendingAudits
+                    && Interlocked.Exchange(ref _pendingAuditOverflowLogged, 1) == 0)
+                {
+                    _logger.LogWarning(
+                        "审计待写队列因持续回填已达 {PendingCount} 条（正常上限 {MaxPendingAudits}），失败回填路径不受上限约束，请关注 DB 可用性",
+                        pendingCount, MaxPendingAudits);
+                }
+
                 throw;
             }
         }
