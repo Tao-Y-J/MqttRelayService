@@ -245,6 +245,90 @@ namespace MqttRelayService.Tests
         }
 
         [Fact]
+        public async Task GetMessageByIdAsync_ShouldReturnExactMessageOnly()
+        {
+            await _repository.InitializeAsync();
+            var now = DateTime.Now;
+
+            await _repository.RecordMessageAuditsAsync(new[]
+            {
+                new MessageAuditRecord
+                {
+                    MessageId = "target-msg",
+                    Topic = "topic/exact",
+                    SourceClientId = "client_exact",
+                    Payload = "exact-payload",
+                    Status = "Succeeded",
+                    CreatedAt = now.AddSeconds(-3),
+                    UpdatedAt = now.AddSeconds(-3)
+                },
+                new MessageAuditRecord
+                {
+                    MessageId = "target-msg-extra",
+                    Topic = "topic/other",
+                    SourceClientId = "client_other",
+                    Payload = "wrong-id",
+                    Status = "Failed",
+                    ErrorMessage = "contains target-msg",
+                    CreatedAt = now.AddSeconds(-2),
+                    UpdatedAt = now.AddSeconds(-2)
+                },
+                new MessageAuditRecord
+                {
+                    MessageId = "another-msg",
+                    Topic = "topic/target-msg/search-hit",
+                    SourceClientId = "client_topic",
+                    Payload = "wrong-topic",
+                    Status = "Queued",
+                    CreatedAt = now.AddSeconds(-1),
+                    UpdatedAt = now.AddSeconds(-1)
+                }
+            });
+
+            var exact = await _repository.GetMessageByIdAsync("target-msg");
+            var missing = await _repository.GetMessageByIdAsync("not-found-msg");
+
+            Assert.NotNull(exact);
+            Assert.Equal("target-msg", exact!.MessageId);
+            Assert.Equal("exact-payload", exact.Payload);
+            Assert.Null(missing);
+        }
+
+        [Fact]
+        public async Task GetPagedMessagesAsync_ShouldOrderByUpdatedAtDescending()
+        {
+            await _repository.InitializeAsync();
+            var now = DateTime.Now;
+
+            await _repository.RecordMessageAuditsAsync(new[]
+            {
+                new MessageAuditRecord
+                {
+                    MessageId = "created_newer_updated_older",
+                    Topic = "topic/1",
+                    SourceClientId = "client_1",
+                    Status = "Succeeded",
+                    CreatedAt = now,
+                    UpdatedAt = now.AddSeconds(-10)
+                },
+                new MessageAuditRecord
+                {
+                    MessageId = "created_older_updated_newer",
+                    Topic = "topic/2",
+                    SourceClientId = "client_2",
+                    Status = "Succeeded",
+                    CreatedAt = now.AddMinutes(-1),
+                    UpdatedAt = now.AddSeconds(5)
+                }
+            });
+
+            var (_, items) = await _repository.GetPagedMessagesAsync(1, 10);
+
+            Assert.Equal("created_older_updated_newer", items[0].MessageId);
+            Assert.Equal("created_newer_updated_older", items[1].MessageId);
+        }
+
+        [Fact]
         public async Task RecordMessageAuditsAsync_ShouldPersistLargeSqliteBatchWithoutDroppingRows()
         {
             await _repository.InitializeAsync();
@@ -429,6 +513,37 @@ namespace MqttRelayService.Tests
             Assert.Equal(2, summary.RecentItems.Count);
             Assert.Equal("sum_3", summary.RecentItems[0].MessageId);
             Assert.Equal("sum_2", summary.RecentItems[1].MessageId);
+        }
+
+        [Fact]
+        public async Task GetDashboardMessageSummaryAsync_ShouldOrderRecentItemsByUpdatedAtDescending()
+        {
+            await _repository.InitializeAsync();
+
+            var now = DateTime.Now;
+            await _repository.RecordMessageAuditAsync(new MessageAuditRecord
+            {
+                MessageId = "recent_created_newer",
+                Topic = "topic/recent/1",
+                SourceClientId = "client_1",
+                Status = "Succeeded",
+                CreatedAt = now,
+                UpdatedAt = now.AddSeconds(-10)
+            });
+            await _repository.RecordMessageAuditAsync(new MessageAuditRecord
+            {
+                MessageId = "recent_updated_newer",
+                Topic = "topic/recent/2",
+                SourceClientId = "client_2",
+                Status = "Failed",
+                CreatedAt = now.AddMinutes(-1),
+                UpdatedAt = now.AddSeconds(5)
+            });
+
+            var summary = await _repository.GetDashboardMessageSummaryAsync(10);
+
+            Assert.Equal("recent_updated_newer", summary.RecentItems[0].MessageId);
+            Assert.Equal("recent_created_newer", summary.RecentItems[1].MessageId);
         }
 
         [Fact]

@@ -341,6 +341,27 @@ namespace MqttRelayService.Services.Implementations
             }
         }
 
+        public async Task<MessageAuditRecord?> GetMessageByIdAsync(string messageId)
+        {
+            if (string.IsNullOrWhiteSpace(messageId))
+            {
+                return null;
+            }
+
+            try
+            {
+                await EnsureSchemaAsync();
+                return await _db.Queryable<MessageAuditRecord>()
+                    .Where(x => x.MessageId == messageId)
+                    .SingleAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "按消息 ID {MessageId} 精确查询消息审计记录失败", messageId);
+                return null;
+            }
+        }
+
         public async Task<(int TotalCount, IReadOnlyList<MessageAuditRecord> Items)> GetPagedMessagesAsync(
             int page,
             int pageSize,
@@ -369,7 +390,7 @@ namespace MqttRelayService.Services.Implementations
 
                 var totalCount = await query.CountAsync();
                 var items = await query
-                    .OrderBy(x => x.CreatedAt, OrderByType.Desc)
+                    .OrderBy(x => x.UpdatedAt, OrderByType.Desc)
                     .Skip((page - 1) * pageSize)
                     .Take(pageSize)
                     .ToListAsync();
@@ -440,7 +461,7 @@ namespace MqttRelayService.Services.Implementations
                 var totalFailed = await query.Clone().Where(x => x.Status == "Failed").CountAsync();
                 var totalDeadLetter = await query.Clone().Where(x => x.Status == "DeadLetter").CountAsync();
                 var recentItems = await query.Clone()
-                    .OrderBy(x => x.CreatedAt, OrderByType.Desc)
+                    .OrderBy(x => x.UpdatedAt, OrderByType.Desc)
                     .Take(recentCount)
                     .ToListAsync();
 

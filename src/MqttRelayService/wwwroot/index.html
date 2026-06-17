@@ -1474,6 +1474,19 @@
             activeCount: 0
         };
         let throughputSyncTimer = null;
+        const dashboardAuth = window.__dashboardAuth || { apiKey: null };
+
+        function dashboardFetch(input, init = {}) {
+            const headers = new Headers(init.headers || {});
+            if (dashboardAuth.apiKey) {
+                headers.set('X-Api-Key', dashboardAuth.apiKey);
+            }
+
+            return fetch(input, {
+                ...init,
+                headers
+            });
+        }
 
         // 1. 在线客户端分页状态
         let clientsPage = 1;
@@ -1634,7 +1647,7 @@
                 document.getElementById('last-update-time').textContent = now.toTimeString().split(' ')[0];
 
                 // 1. 获取核心统计大屏
-                const response = await fetch('/api/metrics');
+                const response = await dashboardFetch('/api/metrics');
                 if (!response.ok) throw new Error('接口请求失败');
                 rawMetrics = await response.json();
 
@@ -1649,7 +1662,7 @@
 
         async function fetchThroughputSettings() {
             try {
-                const response = await fetch('/api/settings/throughput');
+                const response = await dashboardFetch('/api/settings/throughput');
                 if (response.ok) {
                     throughputSettings = await response.json();
                     syncSlidersUI();
@@ -1759,7 +1772,7 @@
             syncBadge.className = 'badge badge-queued';
 
             try {
-                const response = await fetch('/api/settings/throughput', {
+                const response = await dashboardFetch('/api/settings/throughput', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
@@ -1982,7 +1995,7 @@
 
             try {
                 const url = `/api/clients/history?page=${historyPage}&pageSize=${historyPageSize}&search=${encodeURIComponent(search)}&eventType=${encodeURIComponent(eventFilter)}`;
-                const response = await fetch(url);
+                const response = await dashboardFetch(url);
                 if (response.ok) {
                     const data = await response.json();
                     renderHistoryUI(data.total || data.totalCount, data.items);
@@ -2093,7 +2106,7 @@
 
             try {
                 const url = `/api/messages?page=${messagesPage}&pageSize=${messagesPageSize}&search=${encodeURIComponent(search)}&status=${encodeURIComponent(statusFilter)}`;
-                const response = await fetch(url);
+                const response = await dashboardFetch(url);
                 if (response.ok) {
                     const data = await response.json();
                     renderMessagesUI(data.total || data.totalCount, data.items);
@@ -2195,7 +2208,7 @@
             try {
                 // 死信专属查询：强制限制 status = DeadLetter，极速响应
                 const url = `/api/messages?page=${dlqPage}&pageSize=${dlqPageSize}&search=${encodeURIComponent(search)}&status=DeadLetter`;
-                const response = await fetch(url);
+                const response = await dashboardFetch(url);
                 if (response.ok) {
                     const data = await response.json();
                     renderDlqUI(data.total || data.totalCount, data.items);
@@ -2303,11 +2316,11 @@
                 document.getElementById('drawer-msg-payload').textContent = "正在拉取历史归档报文...";
 
                 // 直接拉取物理记录详情
-                fetch(`/api/messages?search=${messageId}`)
-                    .then(res => res.json())
+                dashboardFetch(`/api/messages/${encodeURIComponent(messageId)}`)
+                    .then(res => res.ok ? res.json() : null)
                     .then(data => {
-                        if (data.items && data.items.length > 0) {
-                            fillDrawerWithLog(data.items[0]);
+                        if (data) {
+                            fillDrawerWithLog(data);
                         }
                     });
             } else {
@@ -2358,7 +2371,7 @@
             payloadCodeBox.textContent = "正在解密有效载荷内容...";
 
             // 从 Minimal API 实时拉取数据库中保留的消息 Payload 实体
-            fetch(`/api/payload/${log.messageId}`)
+            dashboardFetch(`/api/payload/${encodeURIComponent(log.messageId)}`)
                 .then(res => {
                     if (res.ok) return res.json();
                     return null;

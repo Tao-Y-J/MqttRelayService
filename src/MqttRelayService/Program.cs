@@ -1,6 +1,7 @@
 ﻿using System;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
@@ -254,6 +255,16 @@ namespace MqttRelayService
                 return Results.Ok(new { total = result.TotalCount, items = result.Items });
             });
 
+            api.MapGet("/messages/{messageId}", async (
+                string messageId,
+                IAuditRepository auditRepo) =>
+            {
+                var record = await auditRepo.GetMessageByIdAsync(messageId);
+                return record is null
+                    ? Results.NotFound(new { messageId, error = "Message audit record not found." })
+                    : Results.Ok(record);
+            });
+
             api.MapGet("/payload/{messageId}", async (
                 string messageId,
                 IMetricsService metricsService,
@@ -265,17 +276,9 @@ namespace MqttRelayService
                     return Results.Ok(new { messageId, payload = payloadStr });
                 }
 
-                var result = await auditRepo.GetPagedMessagesAsync(
-                    1,
-                    1,
-                    status: null,
-                    topic: null,
-                    sourceClientId: null,
-                    search: messageId);
-
-                if (result.Items.Count > 0)
+                var record = await auditRepo.GetMessageByIdAsync(messageId);
+                if (record != null)
                 {
-                    var record = result.Items[0];
                     return Results.Ok(new { messageId, payload = record.Payload ?? string.Empty });
                 }
 
@@ -363,26 +366,42 @@ namespace MqttRelayService
                 return;
             }
 
-            app.UseStaticFiles(new StaticFileOptions
-            {
-                FileProvider = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(staticFilesDir),
-                RequestPath = ""
-            });
-
-            app.MapGet("/", async context =>
+            async Task ServeDashboardAsync(HttpContext context)
             {
                 context.Response.ContentType = "text/html; charset=utf-8";
                 var htmlPath = Path.Combine(staticFilesDir, "index.html");
                 if (File.Exists(htmlPath))
                 {
-                    await context.Response.SendFileAsync(htmlPath);
+                    var html = await File.ReadAllTextAsync(htmlPath);
+                    var webOptions = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<WebOptions>>().Value;
+                    await context.Response.WriteAsync(BuildDashboardHtml(html, webOptions));
                 }
                 else
                 {
                     context.Response.StatusCode = 404;
                     await context.Response.WriteAsync("MQTT Relay Dashboard page not found.");
                 }
+            }
+
+            app.MapGet("/", ServeDashboardAsync);
+            app.MapGet("/index.html", ServeDashboardAsync);
+        }
+
+        private static string BuildDashboardHtml(string html, WebOptions webOptions)
+        {
+            var bootstrapJson = JsonSerializer.Serialize(new
+            {
+                apiKey = string.IsNullOrWhiteSpace(webOptions.ApiKey) ? null : webOptions.ApiKey
             });
+
+            var bootstrapScript = $"<script>window.__dashboardAuth = {bootstrapJson};</script>";
+            var headCloseIndex = html.IndexOf("</head>", StringComparison.OrdinalIgnoreCase);
+            if (headCloseIndex >= 0)
+            {
+                return html.Insert(headCloseIndex, bootstrapScript);
+            }
+
+            return bootstrapScript + html;
         }
 
         /// <summary>

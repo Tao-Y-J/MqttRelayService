@@ -31,6 +31,11 @@ namespace MqttRelayService.Services.Abstractions
         Task RecordClientConnectionHistoryAsync(ClientConnectionHistoryRecord record);
 
         /// <summary>
+        /// 按消息 ID 精确获取单条消息审计记录。
+        /// </summary>
+        Task<MessageAuditRecord?> GetMessageByIdAsync(string messageId);
+
+        /// <summary>
         /// 获取分页消息审计列表。
         /// </summary>
         Task<(int TotalCount, IReadOnlyList<MessageAuditRecord> Items)> GetPagedMessagesAsync(
