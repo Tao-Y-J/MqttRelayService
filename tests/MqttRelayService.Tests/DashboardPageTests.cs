@@ -66,6 +66,34 @@ namespace MqttRelayService.Tests
             Assert.Contains("decodeURIComponent(encodedMessageId", source);
         }
 
+        [Fact]
+        public void DashboardSource_ShouldRenderAuditStorageFromRealConfiguration()
+        {
+            var source = ReadDashboardSource();
+
+            // 审计存储卡片曾写死「自动滑动容量清理 / 消息表保留上限 20,000 条 / 客户端历史保留上限 5,000 条 /
+            // 物理清理频率 每 100 次写入检测」，而按行数上限的裁剪在后端从未实现（真实保留策略只有按天数清理）。
+            // 这些静态文本会让运维误判保留策略，必须保持删除状态。
+            Assert.DoesNotContain("自动滑动容量清理", source);
+            Assert.DoesNotContain("20,000 条", source);
+            Assert.DoesNotContain("5,000 条", source);
+            Assert.DoesNotContain("每 100 次写入检测", source);
+            Assert.DoesNotContain("Configured Provider", source);
+            Assert.DoesNotContain("已启用 (Enabled)", source);
+
+            // 卡片动态值只能来自只读配置接口
+            Assert.Contains("fetchAuditStorageSettings", source);
+            Assert.Contains("updateAuditStorageUI", source);
+            Assert.Contains("dashboardFetch('/api/settings/audit-storage')", source);
+            Assert.Contains("id=\"audit-provider\"", source);
+            Assert.Contains("id=\"audit-storage-path\"", source);
+            Assert.Contains("id=\"audit-retention-days\"", source);
+            Assert.Contains("id=\"audit-cleanup-schedule\"", source);
+            Assert.Contains("id=\"audit-vacuum\"", source);
+            Assert.Contains("id=\"audit-message-threshold\"", source);
+            Assert.Contains("id=\"audit-history-threshold\"", source);
+        }
+
         /// <summary>
         /// 从测试输出目录向上定位仓库根目录后读取 Dashboard 页面源码，
         /// 避免依赖输出目录层级的硬编码相对路径。

@@ -325,6 +325,46 @@ namespace MqttRelayService
             }
         }
 
+        /// <summary>
+        /// 构造 Web 管理面「审计持久化存储」卡片所需的只读配置快照。
+        /// 刻意只回传展示字段、不回传连接串原文：Web 管理面在未配置 Web:ApiKey 时匿名可访问，
+        /// 而连接串可能包含账号密码，属于不能下发到浏览器的信息；非 SQLite 提供程序只回传提供程序名。
+        /// </summary>
+        internal static AuditStorageSettingsDto BuildAuditStorageSettings(AuditStorageOptions options)
+        {
+            var provider = options.Provider ?? string.Empty;
+
+            return new AuditStorageSettingsDto(
+                provider,
+                IsSqliteProvider(provider)
+                    ? AuditRepository.ExtractSqliteDataSource(options.ConnectionString)
+                    : null,
+                options.AutoInitializeSchema,
+                options.RetentionDays,
+                options.RetentionDays > 0,
+                options.CleanupAtHour,
+                options.CleanupIntervalMinutes,
+                options.VacuumAfterCleanup,
+                options.MessageArchiveThreshold,
+                options.ClientHistoryArchiveThreshold);
+        }
+
+        /// <summary>
+        /// 判断提供程序是否为 SQLite。提供程序名非法时按「非 SQLite」处理，
+        /// 保证只读展示接口不会因为配置笔误返回 500（真正的非法提供程序由仓储构造时的 ParseDbType 拦截）。
+        /// </summary>
+        private static bool IsSqliteProvider(string provider)
+        {
+            try
+            {
+                return AuditRepository.ParseDbType(provider) == SqlSugar.DbType.Sqlite;
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
+        }
+
         private static void MapWebEndpoints(WebApplication app)
         {
             var webOptions = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<WebOptions>>().Value;
@@ -433,6 +473,13 @@ namespace MqttRelayService
                     maxConcurrency = controller.MaxConcurrency,
                     activeCount = controller.ActiveCount
                 });
+            });
+
+            // 审计持久化配置只有启动时读取一次，运行期没有改写端点，前端因此只需加载一次
+            api.MapGet("/settings/audit-storage", (
+                Microsoft.Extensions.Options.IOptions<AuditStorageOptions> auditStorageOptions) =>
+            {
+                return Results.Ok(BuildAuditStorageSettings(auditStorageOptions.Value));
             });
 
             api.MapGet("/clients/active", async (IClientRegistry clientRegistry) =>
@@ -601,4 +648,23 @@ namespace MqttRelayService
     /// 吞吐量调控传输参数，MaxMessagesPerSecond 表示单线程每秒最大转发量。
     /// </summary>
     public record ThroughputSettingsDto(int MaxMessagesPerSecond, int MaxConcurrency);
+
+    /// <summary>
+    /// 审计持久化存储的只读展示参数，用于 Dashboard 展示真实生效的审计配置与保留策略。
+    /// 刻意不包含连接串原文：只有 SQLite 会回传 <see cref="SqliteDataSource"/>（连接串里的文件路径）。
+    /// <see cref="CleanupEnabled"/> 为 false 表示 <see cref="RetentionDays"/> 配成 0、审计数据清理已关闭。
+    /// <see cref="MessageArchiveThreshold"/> 与 <see cref="ClientHistoryArchiveThreshold"/> 只是启动告警阈值，
+    /// 不触发任何删除动作。
+    /// </summary>
+    public record AuditStorageSettingsDto(
+        string Provider,
+        string? SqliteDataSource,
+        bool AutoInitializeSchema,
+        int RetentionDays,
+        bool CleanupEnabled,
+        int? CleanupAtHour,
+        int CleanupIntervalMinutes,
+        bool VacuumAfterCleanup,
+        int MessageArchiveThreshold,
+        int ClientHistoryArchiveThreshold);
 }

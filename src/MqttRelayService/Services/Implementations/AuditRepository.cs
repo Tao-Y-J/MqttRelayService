@@ -91,6 +91,26 @@ namespace MqttRelayService.Services.Implementations
             throw new ArgumentException($"不支持的审计数据库提供程序: {provider}", nameof(provider));
         }
 
+        /// <summary>
+        /// 从连接串中提取 <c>Data Source</c> 的原始配置值（不做路径展开）。
+        /// Web 管理面展示审计文件路径时复用该方法，只回传路径本身，避免把可能含账号密码的完整连接串回传给浏览器。
+        /// </summary>
+        internal static string? ExtractSqliteDataSource(string? connectionString)
+        {
+            var parts = (connectionString ?? string.Empty)
+                .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            foreach (var part in parts)
+            {
+                var kv = part.Split('=', 2, StringSplitOptions.TrimEntries);
+                if (kv.Length == 2 && kv[0].Equals("Data Source", StringComparison.OrdinalIgnoreCase))
+                {
+                    return kv[1];
+                }
+            }
+
+            return null;
+        }
+
         private static string? ResolveSqliteDataSourcePath(AuditStorageOptions options)
         {
             var dbType = ParseDbType(options.Provider);
@@ -99,24 +119,15 @@ namespace MqttRelayService.Services.Implementations
                 return null;
             }
 
-            var connectionString = options.ConnectionString ?? string.Empty;
-            var parts = connectionString.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            foreach (var part in parts)
+            var path = ExtractSqliteDataSource(options.ConnectionString);
+            if (path is null)
             {
-                var kv = part.Split('=', 2, StringSplitOptions.TrimEntries);
-                if (kv.Length == 2 && kv[0].Equals("Data Source", StringComparison.OrdinalIgnoreCase))
-                {
-                    var path = kv[1];
-                    if (Path.IsPathRooted(path))
-                    {
-                        return path;
-                    }
-
-                    return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, path));
-                }
+                return null;
             }
 
-            return null;
+            return Path.IsPathRooted(path)
+                ? path
+                : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, path));
         }
 
         private static string BuildConnectionString(AuditStorageOptions options, string? sqliteDataSourcePath)

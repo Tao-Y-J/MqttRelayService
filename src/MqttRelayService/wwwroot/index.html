@@ -1383,7 +1383,7 @@
                     </div>
                 </div>
 
-                <!-- 审计存储状态卡片 -->
+                <!-- 审计存储状态卡片：动态值全部由 /api/settings/audit-storage 填充，页面不写死任何配置 -->
                 <div class="panel">
                     <div class="panel-header">
                         <span class="panel-title"><i class="fa-solid fa-database"></i> 审计持久化存储</span>
@@ -1391,32 +1391,39 @@
                     <div class="sys-property-list">
                         <div class="sys-property-item">
                             <span class="sys-property-name">数据库类型</span>
-                            <span class="sys-property-value code-bold" style="color: var(--color-cyan);">Configured Provider</span>
+                            <span class="sys-property-value code-bold" style="color: var(--color-cyan);" id="audit-provider">-</span>
                         </div>
                         <div class="sys-property-item">
                             <span class="sys-property-name">文件存储路径</span>
-                            <span class="sys-property-value code-text">data/audit.db</span>
+                            <span class="sys-property-value code-text" id="audit-storage-path">-</span>
                         </div>
                         <div class="sys-property-item">
-                            <span class="sys-property-name">自动滑动容量清理</span>
-                            <span class="sys-property-value" style="color: var(--color-success);">已启用 (Enabled)</span>
+                            <span class="sys-property-name">数据保留策略</span>
+                            <span class="sys-property-value" id="audit-retention-days">-</span>
                         </div>
                         <div class="sys-property-item">
-                            <span class="sys-property-name">消息表保留上限</span>
-                            <span class="sys-property-value">20,000 条</span>
+                            <span class="sys-property-name">清理调度</span>
+                            <span class="sys-property-value" id="audit-cleanup-schedule">-</span>
                         </div>
                         <div class="sys-property-item">
-                            <span class="sys-property-name">客户端历史保留上限</span>
-                            <span class="sys-property-value">5,000 条</span>
+                            <span class="sys-property-name">清理后 VACUUM</span>
+                            <span class="sys-property-value" id="audit-vacuum">-</span>
                         </div>
                         <div class="sys-property-item">
-                            <span class="sys-property-name">物理清理频率</span>
-                            <span class="sys-property-value">每 100 次写入检测</span>
+                            <span class="sys-property-name">消息表归档提示阈值</span>
+                            <span class="sys-property-value" id="audit-message-threshold">-</span>
                         </div>
                         <div class="sys-property-item">
-                            <span class="sys-property-name">死锁控制锁</span>
+                            <span class="sys-property-name">客户端历史归档提示阈值</span>
+                            <span class="sys-property-value" id="audit-history-threshold">-</span>
+                        </div>
+                        <div class="sys-property-item">
+                            <span class="sys-property-name">审计写入互斥锁</span>
                             <span class="sys-property-value code-text">SemaphoreSlim(1, 1)</span>
                         </div>
+                    </div>
+                    <div style="margin-top: 0.75rem; font-size: 0.8rem; color: var(--text-muted); line-height: 1.6;">
+                        保留策略只有按天数清理：不存在按行数上限的自动裁剪；归档提示阈值只在启动时写告警日志，不删除数据。
                     </div>
                 </div>
             </div>
@@ -1723,6 +1730,56 @@
             const concSlider = document.getElementById('slider-concurrency');
             concSlider.value = throughputSettings.maxConcurrency;
             onConcurrencySliderChange(throughputSettings.maxConcurrency);
+        }
+
+        // 审计持久化配置在运行期不可变更，页面只在加载时拉取一次
+        async function fetchAuditStorageSettings() {
+            try {
+                const response = await dashboardFetch('/api/settings/audit-storage');
+                if (!response.ok) throw new Error('接口请求失败');
+                updateAuditStorageUI(await response.json());
+            } catch (err) {
+                // 拉取失败时保留占位符，绝不用页面写死的数字冒充真实配置
+                console.error('获取审计存储配置失败:', err);
+            }
+        }
+
+        // 渲染审计持久化存储卡片：所有取值都来自服务端只读配置接口
+        function updateAuditStorageUI(settings) {
+            const setText = (id, text) => {
+                const element = document.getElementById(id);
+                if (element) element.textContent = text;
+            };
+
+            const provider = settings.provider || '未知';
+            setText('audit-provider', provider);
+
+            setText(
+                'audit-storage-path',
+                settings.sqliteDataSource || '非 SQLite 提供程序（连接串不回传）');
+
+            setText(
+                'audit-retention-days',
+                settings.cleanupEnabled
+                    ? `保留最近 ${settings.retentionDays} 天（按记录创建时间删除超期行）`
+                    : '已关闭（RetentionDays=0，数据无界增长，需运维手工维护）');
+
+            // CleanupAtHour 有值时按每日整点清理，否则退回 CleanupIntervalMinutes 等间隔模式
+            setText(
+                'audit-cleanup-schedule',
+                settings.cleanupAtHour == null
+                    ? `每 ${settings.cleanupIntervalMinutes} 分钟`
+                    : `每天 ${String(settings.cleanupAtHour).padStart(2, '0')}:00（本机时间）`);
+
+            setText('audit-vacuum', settings.vacuumAfterCleanup ? '已开启' : '已关闭');
+
+            const thresholdSuffix = ' 条（仅启动告警，不删除数据）';
+            setText(
+                'audit-message-threshold',
+                Number(settings.messageArchiveThreshold).toLocaleString('en-US') + thresholdSuffix);
+            setText(
+                'audit-history-threshold',
+                Number(settings.clientHistoryArchiveThreshold).toLocaleString('en-US') + thresholdSuffix);
         }
 
         // ==================== 吞吐与并发控制交互 ====================
@@ -2509,6 +2566,7 @@
             initCharts();
             fetchMetrics();
             fetchThroughputSettings();
+            fetchAuditStorageSettings();
 
             // 1 秒主面板大屏异步高频轮询，保证秒级响应
             setInterval(fetchMetrics, 1000);
