@@ -53,7 +53,7 @@ namespace MqttRelayService.Tests
             builder.Logging.ClearProviders();
 
             Program.ConfigureCoreServices(builder.Services, configuration, enableWeb: false);
-            Program.RegisterHostedServices(builder.Services);
+            Program.RegisterHostedServices(builder.Services, enableWeb: false);
 
             using var host = builder.Build();
 

@@ -525,7 +525,7 @@ public interface IMessageRouter
 - `Reliability:MaxConcurrencyHardLimit` 是吞吐并发度硬上限，限制运行期通过 API 上调的最大并发
 - `Reliability:DeliverySemantics` 只支持 `AtLeastOnce`，其他取值在启动校验阶段直接失败
 - `Web:Enabled` 控制是否创建 Web 宿主；`Web:ApiKey` 为空时 `/api` 端点跳过鉴权，否则校验请求头 `X-Api-Key`
-- `AuditStorage` 配置审计持久化：Provider、连接串、自动建表，以及两张审计表的归档阈值（只提示运维迁移，不自动删除数据）
+- `AuditStorage` 配置审计持久化：Provider、连接串、自动建表、两张审计表的归档阈值（只提示运维迁移，不因为达到阈值删除数据），以及审计数据保留清理（`RetentionDays` 默认 30 天、`0` 表示关闭；`CleanupAtHour` 默认每天 3 点，留空则按 `CleanupIntervalMinutes` 等间隔，间隔上限 1440 分钟；`VacuumAfterCleanup` 默认开启）
 
 ---
 
@@ -1229,8 +1229,9 @@ tests/
 ### 职责
 - `MetricsService` 维护全局原子计数、定长采样历史、有界载荷缓存（上限 100），并持有消息审计（上限 50000）与客户端历史（上限 10000）两个有界待写队列，由同一个后台 writer 批量落库
 - MQTT 事件回调只做有界入队，绝不在回调线程访问数据库
-- `AuditRepository` 负责最终态快照 Upsert、批量写入、分页查询与 Dashboard 摘要聚合；分页参数在仓储层统一收敛（页长上限 200、页码上限 1000000）
-- `InitializeAsync` 收敛上次非正常关闭残留的在途状态为 `Failed`，并按归档阈值打印迁移提示，不自动删除数据
+- `AuditRepository` 负责最终态快照 Upsert、批量写入、分页查询、Dashboard 摘要聚合，以及按保留天数分批删除超期行；分页参数在仓储层统一收敛（页长上限 200、页码上限 1000000）
+- `InitializeAsync` 收敛上次非正常关闭残留的在途状态为 `Failed`，并按归档阈值打印迁移提示（阈值只提示，不触发删除）
+- `AuditCleanupWorker` 负责审计数据保留清理：启动清理一次，之后每天至少一次；删除在仓储写锁内按主键分批完成，`VACUUM` 在写锁之外执行，且只在 SQLite 提供程序上执行
 
 ---
 

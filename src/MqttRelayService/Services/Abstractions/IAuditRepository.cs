@@ -64,6 +64,18 @@ namespace MqttRelayService.Services.Abstractions
             string? search = null);
 
         /// <summary>
+        /// 删除早于指定时间点的消息审计记录，返回删除条数。
+        /// 用于审计数据保留清理，按主键分批删除以避免单个长事务。
+        /// </summary>
+        Task<int> DeleteExpiredMessageAuditsAsync(DateTime cutoff);
+
+        /// <summary>
+        /// 删除早于指定时间点的客户端连接历史记录，返回删除条数。
+        /// 用于审计数据保留清理，按主键分批删除以避免单个长事务。
+        /// </summary>
+        Task<int> DeleteExpiredClientHistoriesAsync(DateTime cutoff);
+
+        /// <summary>
         /// 获取 Dashboard 汇总数据。
         /// </summary>
         Task<(

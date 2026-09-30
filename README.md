@@ -130,7 +130,11 @@ Scripts\uninstall-service.cmd
         "ConnectionString": "Data Source=data/audit.db",
         "AutoInitializeSchema": true,
         "MessageArchiveThreshold": 5000000,
-        "ClientHistoryArchiveThreshold": 1000000
+        "ClientHistoryArchiveThreshold": 1000000,
+        "RetentionDays": 30,
+        "CleanupAtHour": 3,
+        "CleanupIntervalMinutes": 1440,
+        "VacuumAfterCleanup": true
     },
     "Serilog": {
         "FileNamePrefix": "relay",
@@ -177,6 +181,10 @@ Scripts\uninstall-service.cmd
 | **AuditStorage** | `AutoInitializeSchema` | 是否在启动时自动初始化审计表结构；SQLite 数据文件所在目录不存在时会被创建 |
 | **AuditStorage** | `MessageArchiveThreshold` | 启动时按该条数检查消息审计表规模，达到即记录迁移提示日志，不触发自动删除 |
 | **AuditStorage** | `ClientHistoryArchiveThreshold` | 启动时按该条数检查客户端历史表规模，达到即记录迁移提示日志，不触发自动删除 |
+| **AuditStorage** | `RetentionDays` | 审计数据（消息审计表与客户端历史表）保留天数，默认 `30`；清理时删除早于「当前本机时间 − 保留天数」的记录，配置为 `0` 表示关闭清理 |
+| **AuditStorage** | `CleanupAtHour` | 每日清理时刻（本机时间整点，`0-23`），默认 `3`；留空（`null`）时改为按 `CleanupIntervalMinutes` 等间隔执行 |
+| **AuditStorage** | `CleanupIntervalMinutes` | `CleanupAtHour` 留空时的清理间隔（分钟），默认 `1440`；启动时校验范围 `1-1440`，用上限保证每天至少清理一次 |
+| **AuditStorage** | `VacuumAfterCleanup` | 清理后是否对 SQLite 执行 `VACUUM` 回收 `.db` 文件空间，默认 `true`；`DELETE` 本身不会缩小数据库文件，关闭该开关时磁盘占用会停留在历史峰值 |
 | **Web** | `Enabled` | 是否启用统一 Web 管理面；`false` 时退化为纯 Worker Host，不监听 Web 端口 |
 | **Web** | `Port` | 统一 Web 监听端口，Dashboard 页面与 `/api` 共用同一个 Kestrel 监听（`ListenAnyIP`） |
 | **Web** | `ApiKey` | API 访问密钥；为空时所有 `/api` 端点都不校验鉴权，非空时要求请求头 `X-Api-Key` 与该值完全一致 |
@@ -190,7 +198,13 @@ Scripts\uninstall-service.cmd
 
 默认使用 SQLite 审计库存储，连接串 `Data Source=data/audit.db` 会被解析到程序基目录下的 `data` 目录；如果数据库文件不存在，启动时会自动创建目录、建库并初始化表结构。
 
-服务不提供审计表清理能力：审计表与客户端历史表都不会自动清理、截断或归档。`MessageArchiveThreshold` 与 `ClientHistoryArchiveThreshold` 只在启动时统计一次表规模，达到阈值即记录迁移提示日志，要求运维在数据库侧安排历史数据迁移。
+审计数据会按保留天数自动清理：服务启动后立即清理一次，之后每天至少清理一次（默认每天 03:00），删除早于「当前本机时间 − `RetentionDays`」的消息审计与客户端历史记录。`RetentionDays` 配置为 `0` 表示关闭清理，数据由运维手工维护。清理动作在独立后台任务里执行，不阻塞 MQTT 转发主链路；单轮清理失败只记录日志，不影响后续轮次。
+
+清理只删除行，不会自动缩小 SQLite 数据库文件，因此默认在每次清理后执行 `VACUUM` 回收空间（`VacuumAfterCleanup=true`）。`VACUUM` 需要独占数据库且会重写整库，数据量大时耗时可观；需要更短的清理窗口时可以关闭该开关，磁盘空间改由运维手工回收。
+
+`MessageArchiveThreshold` 与 `ClientHistoryArchiveThreshold` 是清理之外的规模提示：启动时统计一次表规模，达到阈值即记录迁移提示日志，不触发额外删除。
+
+Dashboard 顶部的累计消息总数是启动时读取的累计基线加运行期增量，清理不会让它回落；清理窗口之外的消息在审计列表与按 ID 精确查询中不再可见。
 
 审计持久化属于 Web 管理面的可选能力：初始化失败时服务记录 Error 日志并降级为“审计不可用”，实时指标与 MQTT 转发主链路继续运行。
 
@@ -238,6 +252,7 @@ Web 管理面的安全边界完全依赖网络可达性与 `Web:ApiKey`：服务
 - **有界重试调度**：运行期等待退避的后台重试调度任务受 `MaxPendingRetryTasks` 限制，超限消息直接进入死信
 - **有界死信目录**：死信按 `yyyyMMdd` 日期目录写入，写入时按 `DeadLetterRetentionDays` 清理更早的日期目录
 - **有界审计待写队列**：审计待写队列上限 50000 条，客户端历史待写队列上限 10000 条；两者超限都丢弃新记录并写入日志，不使用无界队列
+- **有界审计数据**：审计数据按 `AuditStorage:RetentionDays`（默认 30 天）自动清理，启动清理一次后每天至少一次；清理后按 `VacuumAfterCleanup` 回收 SQLite 文件空间
 - **异常隔离**：单条消息处理失败不会导致消费者退出或其他消息受影响
 - **确定性停机顺序**：先封堵客户端新发布入口（`StopAcceptingClientPublishes`，Broker 保持运行）→ 取消消费者 → 多轮排空队列（Broker 仍在运行，排空阶段仍能向订阅者注入消息）→ 排空结束后才由 BrokerWorker 停止 Broker
 
@@ -249,7 +264,7 @@ Web 管理面的安全边界完全依赖网络可达性与 `Web:ApiKey`：服务
 - 死信记录写入本地 JSON 文件，不依赖外部存储
 - 未实现磁盘队列或消息持久化
 - 只有停机排空阶段会同步等待退避（`DelayAndRequeueDuringStopAsync`）；停机 drain 是否来得及覆盖一次失败消息的最大退避，取决于 `ShutdownDrainTimeoutMs` 是否不小于 `RetryMaxDelayMs`
-- 审计表与客户端历史表不自动清理、不自动归档，历史规模由运维在数据库侧维护
+- 审计数据按保留天数删除行，不提供按天分区、归档导出或迁移工具；超出 `RetentionDays` 的记录会被直接删除
 - `EchoToSender=false` 只对 MQTT 5.0 订阅者生效：出站拦截依赖注入消息携带的 MQTT 5.0 User Properties（`x-source-client-id`），MQTT 3.1.1 协议本身没有 User Properties 字段，因此 MQTT 3.1.1 订阅者仍会收到发送方自己发布的消息
 
 ## 当前不支持的能力
@@ -265,7 +280,7 @@ Web 管理面的安全边界完全依赖网络可达性与 `Web:ApiKey`：服务
 - 用户/角色体系与细粒度权限控制
 - TLS 加密：MQTT 监听与 Web 管理面都只提供明文 TCP/HTTP
 - MQTT 3.1.1 下的 `EchoToSender=false` 兼容（当前依赖 MQTT 5.0 User Properties）
-- 审计表与客户端历史表的自动清理、截断或归档
+- 审计数据的归档导出、按天分区与手工触发清理的 API（当前只有按保留天数删除行）
 
 **Web 管理面的安全边界完全依赖网络可达性与 `Web:ApiKey`**：没有完整的 ACL、没有 TLS、没有用户/角色体系，`/api/health` 始终匿名可访问，未配置 `Web:ApiKey` 时所有 `/api` 端点都不校验鉴权。
 

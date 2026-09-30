@@ -18,7 +18,7 @@ namespace MqttRelayService.Tests
         {
             var services = new ServiceCollection();
 
-            Program.RegisterHostedServices(services);
+            Program.RegisterHostedServices(services, enableWeb: true);
 
             var hostedServiceTypes = services
                 .Where(descriptor => descriptor.ServiceType == typeof(IHostedService))
@@ -26,12 +26,15 @@ namespace MqttRelayService.Tests
                 .OfType<Type>()
                 .ToArray();
 
+            // AuditCleanupWorker 注册在最后 => 停机时最先退出：清理任务不参与停机排空，
+            // 因此它不需要和排空链路共享停机窗口。
             Assert.Equal(
                 new[]
                 {
                     typeof(QueueMetricsWorker),
                     typeof(BrokerWorker),
-                    typeof(DeliveryWorker)
+                    typeof(DeliveryWorker),
+                    typeof(AuditCleanupWorker)
                 },
                 hostedServiceTypes);
 
@@ -42,6 +45,31 @@ namespace MqttRelayService.Tests
             Assert.True(
                 Array.IndexOf(stopOrder, typeof(BrokerWorker)) < Array.IndexOf(stopOrder, typeof(QueueMetricsWorker)),
                 "QueueMetricsWorker 应最后停止，以便停机排空期间仍可观察队列状态。");
+        }
+
+        [Fact]
+        public void RegisterHostedServices_WebDisabled_ShouldNotRegisterAuditCleanupWorker()
+        {
+            var services = new ServiceCollection();
+
+            Program.RegisterHostedServices(services, enableWeb: false);
+
+            var hostedServiceTypes = services
+                .Where(descriptor => descriptor.ServiceType == typeof(IHostedService))
+                .Select(descriptor => descriptor.ImplementationType)
+                .OfType<Type>()
+                .ToArray();
+
+            // Web 管理面关闭时不存在审计仓储，清理任务不能被注册（否则解析 IAuditRepository 会失败）
+            Assert.DoesNotContain(typeof(AuditCleanupWorker), hostedServiceTypes);
+            Assert.Equal(
+                new[]
+                {
+                    typeof(QueueMetricsWorker),
+                    typeof(BrokerWorker),
+                    typeof(DeliveryWorker)
+                },
+                hostedServiceTypes);
         }
     }
 }

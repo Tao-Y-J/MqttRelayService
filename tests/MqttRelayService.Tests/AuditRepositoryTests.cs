@@ -645,6 +645,166 @@ namespace MqttRelayService.Tests
             Assert.Equal(expectedDbType, actual);
         }
 
+        [Fact]
+        public async Task DeleteExpiredMessageAuditsAsync_ShouldDeleteOnlyRowsOlderThanCutoff()
+        {
+            await _repository.InitializeAsync();
+
+            var cutoff = DateTime.Now.AddDays(-30);
+            await _repository.RecordMessageAuditsAsync(new[]
+            {
+                new MessageAuditRecord
+                {
+                    MessageId = "expired_msg",
+                    Topic = "topic/expired",
+                    SourceClientId = "client_1",
+                    Status = "Succeeded",
+                    CreatedAt = cutoff.AddHours(-1),
+                    UpdatedAt = cutoff.AddHours(-1)
+                },
+                new MessageAuditRecord
+                {
+                    MessageId = "kept_msg",
+                    Topic = "topic/kept",
+                    SourceClientId = "client_2",
+                    Status = "Succeeded",
+                    CreatedAt = cutoff.AddHours(1),
+                    UpdatedAt = cutoff.AddHours(1)
+                }
+            });
+
+            var deleted = await _repository.DeleteExpiredMessageAuditsAsync(cutoff);
+
+            Assert.Equal(1, deleted);
+            var (total, items) = await _repository.GetPagedMessagesAsync(1, 10);
+            Assert.Equal(1, total);
+            Assert.Equal("kept_msg", Assert.Single(items).MessageId);
+        }
+
+        [Fact]
+        public async Task DeleteExpiredMessageAuditsAsync_ShouldDeleteInBatchesWithoutDroppingRows()
+        {
+            await _repository.InitializeAsync();
+
+            var cutoff = DateTime.Now.AddDays(-30);
+            // 1200 条超过 SQLite 单批删除条数 500，也超过单条 IN 参数上限 900，必须靠批删跑完且不能漏行/死循环
+            var records = Enumerable.Range(0, 1200)
+                .Select(i => new MessageAuditRecord
+                {
+                    MessageId = $"expired_batch_{i:D5}",
+                    Topic = "topic/batch",
+                    SourceClientId = "client_batch",
+                    PayloadSize = 1,
+                    Status = "Succeeded",
+                    CreatedAt = cutoff.AddMinutes(-1).AddMilliseconds(i),
+                    UpdatedAt = cutoff.AddMinutes(-1).AddMilliseconds(i)
+                })
+                .ToList();
+
+            await _repository.RecordMessageAuditsAsync(records);
+
+            var deleted = await _repository.DeleteExpiredMessageAuditsAsync(cutoff);
+
+            Assert.Equal(1200, deleted);
+            var (total, items) = await _repository.GetPagedMessagesAsync(1, 10);
+            Assert.Equal(0, total);
+            Assert.Empty(items);
+        }
+
+        [Fact]
+        public async Task DeleteExpiredClientHistoriesAsync_ShouldDeleteOnlyRowsOlderThanCutoff()
+        {
+            await _repository.InitializeAsync();
+
+            var cutoff = DateTime.Now.AddDays(-30);
+            await _repository.RecordClientConnectionHistoriesAsync(new[]
+            {
+                new ClientConnectionHistoryRecord
+                {
+                    ClientId = "expired_client",
+                    ConnectionId = "conn_expired",
+                    Event = "Connected",
+                    Timestamp = cutoff.AddHours(-1)
+                },
+                new ClientConnectionHistoryRecord
+                {
+                    ClientId = "kept_client",
+                    ConnectionId = "conn_kept",
+                    Event = "Connected",
+                    Timestamp = cutoff.AddHours(1)
+                }
+            });
+
+            var deleted = await _repository.DeleteExpiredClientHistoriesAsync(cutoff);
+
+            Assert.Equal(1, deleted);
+            var (total, items) = await _repository.GetPagedClientHistoryAsync(1, 10);
+            Assert.Equal(1, total);
+            Assert.Equal("kept_client", Assert.Single(items).ClientId);
+        }
+
+        [Fact]
+        public async Task DeleteExpiredMessageAuditsAsync_WhenSchemaNotInitialized_ShouldSkipWithoutThrowing()
+        {
+            var options = new AuditStorageOptions
+            {
+                Provider = "Sqlite",
+                ConnectionString = $"Data Source={_dbFile}",
+                AutoInitializeSchema = false
+            };
+            var repository = new AuditRepository(options, new Mock<ILogger<AuditRepository>>().Object);
+
+            // AutoInitializeSchema=false 且从未初始化过表结构：表可能不存在，清理必须跳过而不是抛异常
+            var deleted = await repository.DeleteExpiredMessageAuditsAsync(DateTime.Now.AddDays(-30));
+
+            Assert.Equal(0, deleted);
+        }
+
+        [Fact]
+        public async Task VacuumAsync_ShouldKeepDatabaseUsable()
+        {
+            await _repository.InitializeAsync();
+
+            var now = DateTime.Now;
+            // 待清理记录统一落在 2 分钟前，截止时间取 1 分钟前，保证 500 条全部落在保留窗口之外
+            var expiredAt = now.AddMinutes(-2);
+            var records = Enumerable.Range(0, 500)
+                .Select(i => new MessageAuditRecord
+                {
+                    MessageId = $"vacuum_{i:D4}",
+                    Topic = "topic/vacuum",
+                    SourceClientId = "client_vacuum",
+                    PayloadSize = 64,
+                    Payload = "payload",
+                    Status = "Succeeded",
+                    CreatedAt = expiredAt.AddMilliseconds(i),
+                    UpdatedAt = expiredAt.AddMilliseconds(i)
+                })
+                .ToList();
+
+            await _repository.RecordMessageAuditsAsync(records);
+            var deleted = await _repository.DeleteExpiredMessageAuditsAsync(now.AddMinutes(-1));
+
+            Assert.Equal(500, deleted);
+
+            await _repository.VacuumAsync();
+
+            // VACUUM 之后数据库必须仍然可写可查（不断言文件字节数，SQLite 页级回收不保证字节数下降）
+            await _repository.RecordMessageAuditAsync(new MessageAuditRecord
+            {
+                MessageId = "vacuum_after",
+                Topic = "topic/vacuum",
+                SourceClientId = "client_vacuum",
+                Status = "Succeeded",
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+
+            var (total, items) = await _repository.GetPagedMessagesAsync(1, 10);
+            Assert.Equal(1, total);
+            Assert.Equal("vacuum_after", Assert.Single(items).MessageId);
+        }
+
         private static void AssertDateTimeClose(DateTime expected, DateTime actual)
         {
             Assert.True(

@@ -24,6 +24,13 @@ namespace MqttRelayService.Services.Implementations
         private const int DefaultWriteBatchSize = 200;
 
         /// <summary>
+        /// 单条 SQL 里 IN 条件允许承载的最大参数个数。
+        /// SQLite 默认 SQLITE_MAX_VARIABLE_NUMBER = 999，清理批删必须留出余量，
+        /// 否则大批量删除会以 "too many SQL variables" 失败。
+        /// </summary>
+        private const int SqliteQueryParameterBatchSize = 900;
+
+        /// <summary>
         /// 单页最大条数。分页参数由仓储层统一收敛，任何调用方都无法请求超大页长。
         /// </summary>
         private const int MaxPageSize = 200;
@@ -186,7 +193,7 @@ namespace MqttRelayService.Services.Implementations
         /// </summary>
         /// <summary>
         /// 启动时按配置阈值给出历史数据规模提示。
-        /// 审计表不做自动清理与自动删除，超过阈值只提示运维安排数据迁移。
+        /// 阈值只用于提示，不会因为达到阈值而删除数据；按保留天数的清理由 AuditCleanupWorker 独立负责。
         /// </summary>
         private async Task WarnWhenArchiveThresholdExceededAsync()
         {
@@ -582,6 +589,178 @@ namespace MqttRelayService.Services.Implementations
                 _logger.LogError(ex, "获取 Dashboard 审计摘要失败");
                 return (0, 0, 0, 0, 0, Array.Empty<MessageAuditRecord>());
             }
+        }
+
+        /// <summary>
+        /// 删除早于指定时间点的消息审计记录，返回删除条数。
+        /// 删除全程持 <see cref="_writeLock"/>，与审计写入互斥。
+        /// </summary>
+        public async Task<int> DeleteExpiredMessageAuditsAsync(DateTime cutoff)
+        {
+            await _writeLock.WaitAsync();
+            try
+            {
+                await EnsureSchemaAsync();
+
+                if (!_schemaEnsured)
+                {
+                    // AutoInitializeSchema=false 且从未初始化过表结构：表可能不存在，清理必须跳过而不是抛异常。
+                    return 0;
+                }
+
+                var deletedCount = 0;
+                var batchSize = GetDeleteBatchSize();
+
+                while (true)
+                {
+                    // 先查主键再按主键删除：不用 Deleteable().Take(n)，因为 SQLite 的 DELETE ... LIMIT
+                    // 依赖编译选项 SQLITE_ENABLE_UPDATE_DELETE_LIMIT，并非所有构建都启用。
+                    var expiredIds = await _db.Queryable<MessageAuditRecord>()
+                        .Where(x => x.CreatedAt < cutoff)
+                        .OrderBy(x => x.CreatedAt)
+                        .Select(x => x.MessageId)
+                        .Take(batchSize)
+                        .ToListAsync();
+
+                    if (expiredIds.Count == 0)
+                    {
+                        break;
+                    }
+
+                    var batchDeleted = 0;
+                    foreach (var idChunk in Chunk(expiredIds.Distinct(StringComparer.Ordinal).ToList(), SqliteQueryParameterBatchSize))
+                    {
+                        batchDeleted += await _db.Deleteable<MessageAuditRecord>()
+                            .Where(x => idChunk.Contains(x.MessageId))
+                            .ExecuteCommandAsync();
+                    }
+
+                    deletedCount += batchDeleted;
+
+                    // 没有任何行被删除说明选中的行已不再满足删除条件（例如并发写入后 CreatedAt 已被更新），
+                    // 继续循环只会反复选中同一批主键，必须立即退出。
+                    if (batchDeleted == 0)
+                    {
+                        break;
+                    }
+
+                    if (expiredIds.Count < batchSize)
+                    {
+                        break;
+                    }
+                }
+
+                return deletedCount;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "删除过期消息审计记录失败（截止时间 {Cutoff:o}）", cutoff);
+                throw;
+            }
+            finally
+            {
+                _writeLock.Release();
+            }
+        }
+
+        /// <summary>
+        /// 删除早于指定时间点的客户端连接历史记录，返回删除条数。
+        /// 删除全程持 <see cref="_writeLock"/>，与历史写入互斥。
+        /// </summary>
+        public async Task<int> DeleteExpiredClientHistoriesAsync(DateTime cutoff)
+        {
+            await _writeLock.WaitAsync();
+            try
+            {
+                await EnsureSchemaAsync();
+
+                if (!_schemaEnsured)
+                {
+                    return 0;
+                }
+
+                var deletedCount = 0;
+                var batchSize = GetDeleteBatchSize();
+
+                while (true)
+                {
+                    var expiredIds = await _db.Queryable<ClientConnectionHistoryRecord>()
+                        .Where(x => x.Timestamp < cutoff)
+                        .OrderBy(x => x.Timestamp)
+                        .Select(x => x.Id)
+                        .Take(batchSize)
+                        .ToListAsync();
+
+                    if (expiredIds.Count == 0)
+                    {
+                        break;
+                    }
+
+                    var batchDeleted = 0;
+                    foreach (var idChunk in Chunk(expiredIds.Distinct().ToList(), SqliteQueryParameterBatchSize))
+                    {
+                        batchDeleted += await _db.Deleteable<ClientConnectionHistoryRecord>()
+                            .Where(x => idChunk.Contains(x.Id))
+                            .ExecuteCommandAsync();
+                    }
+
+                    deletedCount += batchDeleted;
+
+                    // 未删除任何行时立即退出，避免反复选中同一批主键形成死循环。
+                    if (batchDeleted == 0)
+                    {
+                        break;
+                    }
+
+                    if (expiredIds.Count < batchSize)
+                    {
+                        break;
+                    }
+                }
+
+                return deletedCount;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "删除过期客户端历史记录失败（截止时间 {Cutoff:o}）", cutoff);
+                throw;
+            }
+            finally
+            {
+                _writeLock.Release();
+            }
+        }
+
+        /// <summary>
+        /// 对 SQLite 执行 VACUUM 回收数据库文件空间。
+        /// DELETE 不会缩小 .db 文件，不回收时磁盘占用会停留在历史峰值。
+        /// VACUUM 需要独占连接且在部分数据库上耗时可观，因此刻意在 <see cref="_writeLock"/> 之外执行：
+        /// 持锁会把审计写入队列堵到内存上限，代价高于让 VACUUM 偶发遇到 SQLite 忙锁后下一轮重试。
+        /// 非 SQLite 提供程序没有 VACUUM 语句，直接跳过。
+        /// </summary>
+        public async Task VacuumAsync()
+        {
+            if (ParseDbType(_options.Provider) != DbType.Sqlite)
+            {
+                return;
+            }
+
+            try
+            {
+                await _db.Ado.ExecuteCommandAsync("VACUUM");
+                _logger.LogInformation("审计数据库 VACUUM 完成，已回收删除记录占用的文件空间");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "审计数据库 VACUUM 失败，本次未回收文件空间，将在下一次清理后重试");
+            }
+        }
+
+        private int GetDeleteBatchSize()
+        {
+            return ParseDbType(_options.Provider) == DbType.Sqlite
+                ? SqliteWriteBatchSize
+                : SqliteExistsQueryBatchSize;
         }
 
     }

@@ -66,6 +66,66 @@ namespace MqttRelayService.Tests
             return services.BuildServiceProvider();
         }
 
+        [Fact]
+        public void ConfigureCoreServices_WithCleanupIntervalBeyondOneDay_ShouldThrow()
+        {
+            // 1441 分钟（超过 24 小时）会让"每天至少清理一次"的保证失效，必须在启动时失败
+            Assert.Throws<InvalidOperationException>(() =>
+                Program.ValidateAuditStorageConfiguration(BuildAuditStorageConfiguration(
+                    ("AuditStorage:CleanupIntervalMinutes", "1441"))));
+        }
+
+        [Fact]
+        public void ConfigureCoreServices_WithCleanupIntervalBelowOneMinute_ShouldThrow()
+        {
+            Assert.Throws<InvalidOperationException>(() =>
+                Program.ValidateAuditStorageConfiguration(BuildAuditStorageConfiguration(
+                    ("AuditStorage:CleanupIntervalMinutes", "0"))));
+        }
+
+        [Fact]
+        public void ConfigureCoreServices_WithInvalidCleanupAtHour_ShouldThrow()
+        {
+            Assert.Throws<InvalidOperationException>(() =>
+                Program.ValidateAuditStorageConfiguration(BuildAuditStorageConfiguration(
+                    ("AuditStorage:CleanupAtHour", "24"))));
+        }
+
+        [Fact]
+        public void ConfigureCoreServices_WithNegativeRetentionDays_ShouldThrow()
+        {
+            // 0 是明确的"关闭清理"，负数属于误配
+            Assert.Throws<InvalidOperationException>(() =>
+                Program.ValidateAuditStorageConfiguration(BuildAuditStorageConfiguration(
+                    ("AuditStorage:RetentionDays", "-1"))));
+        }
+
+        [Fact]
+        public void ConfigureCoreServices_WithDisabledCleanup_ShouldNotThrow()
+        {
+            Program.ValidateAuditStorageConfiguration(BuildAuditStorageConfiguration(
+                ("AuditStorage:RetentionDays", "0")));
+        }
+
+        private static IConfiguration BuildAuditStorageConfiguration(params (string Key, string Value)[] overrides)
+        {
+            var settings = new Dictionary<string, string?>
+            {
+                ["AuditStorage:Provider"] = "Sqlite",
+                ["AuditStorage:ConnectionString"] = "Data Source=data/test-service-registration.db",
+                ["AuditStorage:RetentionDays"] = "30",
+                ["AuditStorage:CleanupAtHour"] = "3",
+                ["AuditStorage:CleanupIntervalMinutes"] = "1440"
+            };
+
+            foreach (var (key, value) in overrides)
+            {
+                settings[key] = value;
+            }
+
+            return new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
+        }
+
         private static async Task AssertResolvesAsync<TService>(IServiceProvider provider)
             where TService : class
         {

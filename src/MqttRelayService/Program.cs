@@ -238,6 +238,8 @@ namespace MqttRelayService
             services.Configure<WebOptions>(configuration.GetSection("Web"));
             services.Configure<AuditStorageOptions>(configuration.GetSection("AuditStorage"));
 
+            ValidateAuditStorageConfiguration(configuration);
+
             services.AddSingleton(sp =>
             {
                 var reliabilityOptions = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<ReliabilityOptions>>().Value;
@@ -294,6 +296,33 @@ namespace MqttRelayService
             services.AddSingleton<IRetryPolicyProvider, RetryPolicyProvider>();
             services.AddSingleton<IMessageRouter, MessageRouter>();
             services.AddSingleton<IMessageDeliveryService, MessageDeliveryService>();
+        }
+
+        /// <summary>
+        /// 校验审计数据清理配置。
+        /// 这些值直接决定「每天至少清理一次」的保证：误配（例如把清理间隔配成 30 天、或把清理时刻配成 25 点）
+        /// 必须在启动时失败，而不能在运行期退化成静默不清理、让审计库随运行时间无界增长。
+        /// <see cref="AuditStorageOptions.RetentionDays"/> 小于 0 视为误配；等于 0 是明确的「关闭清理」语义。
+        /// </summary>
+        internal static void ValidateAuditStorageConfiguration(IConfiguration configuration)
+        {
+            var auditStorageOptions = configuration.GetSection("AuditStorage").Get<AuditStorageOptions>()
+                ?? new AuditStorageOptions();
+
+            if (auditStorageOptions.RetentionDays < 0)
+            {
+                throw new InvalidOperationException("AuditStorage:RetentionDays 不能为负数（配置为 0 表示关闭清理）");
+            }
+
+            if (auditStorageOptions.CleanupAtHour is < 0 or > 23)
+            {
+                throw new InvalidOperationException("AuditStorage:CleanupAtHour 必须是 0-23 之间的整点，留空表示按 AuditStorage:CleanupIntervalMinutes 等间隔执行");
+            }
+
+            if (auditStorageOptions.CleanupIntervalMinutes is < 1 or > 1440)
+            {
+                throw new InvalidOperationException("AuditStorage:CleanupIntervalMinutes 必须大于等于 1 且不超过 1440（分钟），以保证每天至少执行一次清理");
+            }
         }
 
         private static void MapWebEndpoints(WebApplication app)
@@ -548,16 +577,23 @@ namespace MqttRelayService
 
         /// <summary>
         /// 按停机安全顺序注册后台服务。
+        /// <paramref name="enableWeb"/> 为 false（纯 Worker Host）时不存在审计仓储，因此不注册审计清理任务。
         /// </summary>
-        internal static void RegisterHostedServices(IServiceCollection services)
+        internal static void RegisterHostedServices(IServiceCollection services, bool enableWeb = true)
         {
             // 注意：Host 按注册逆序停止，因此先注册的 Worker 会后停止。
-            // 停机顺序必须是：QueueMetricsWorker（最后停）→ BrokerWorker → DeliveryWorker（最先停）。
-            // DeliveryWorker 先停止，先封堵客户端新发布入口，再取消消费者并排空队列；
+            // 停机顺序必须是：AuditCleanupWorker（最先停）→ DeliveryWorker → BrokerWorker → QueueMetricsWorker（最后停）。
+            // DeliveryWorker 先封堵客户端新发布入口，再取消消费者并排空队列；
             // 此时 Broker 仍在运行，排空阶段才能继续向订阅者注入消息。
+            // 审计清理任务不参与停机排空，注册在最后（最先停止）可缩短停机时间。
             services.AddHostedService<QueueMetricsWorker>();
             services.AddHostedService<BrokerWorker>();
             services.AddHostedService<DeliveryWorker>();
+
+            if (enableWeb)
+            {
+                services.AddHostedService<AuditCleanupWorker>();
+            }
         }
     }
 
