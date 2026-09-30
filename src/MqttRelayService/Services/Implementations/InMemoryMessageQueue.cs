@@ -16,6 +16,12 @@ namespace MqttRelayService.Services.Implementations
         private readonly ILogger<InMemoryMessageQueue> _logger;
         private int _peakCount;
 
+        /// <summary>
+        /// 取件信号：每次成功入队释放一次。专用消费线程同步阻塞在该信号上，
+        /// 由入队方直接唤醒，避免 Channel 异步等待产生的线程池续体（详见 <see cref="TryDequeueBlocking"/>）。
+        /// </summary>
+        private readonly SemaphoreSlim _itemsAvailable = new(0);
+
         public InMemoryMessageQueue(IOptions<ReliabilityOptions> options, ILogger<InMemoryMessageQueue> logger)
         {
             _options = options.Value;
@@ -75,6 +81,9 @@ namespace MqttRelayService.Services.Implementations
 
                     await _channel.Writer.WriteAsync(message, linkedCts.Token);
                 }
+
+                // 入队成功后才释放取件信号，保证专用消费线程被唤醒时队列中确实已有消息
+                _itemsAvailable.Release();
 
                 // 更新峰值，使用 CAS 循环保证高并发下峰值只升不降
                 var currentCount = Count;
@@ -136,6 +145,38 @@ namespace MqttRelayService.Services.Implementations
         public IAsyncEnumerable<ForwardMessage> ReadAllAsync(CancellationToken cancellationToken = default)
         {
             return _channel.Reader.ReadAllAsync(cancellationToken);
+        }
+
+        /// <summary>
+        /// 同步阻塞取出消息，供专用消费线程使用。
+        /// 队列为空时阻塞在取件信号上，由入队方直接唤醒本线程，不产生线程池续体；
+        /// 而 Channel 的异步等待在默认选项（AllowSynchronousContinuations=false）下必须由线程池线程恢复，
+        /// 线程池被审计查询等阻塞型工作占满时，取件唤醒会排队数秒（实测最大 3.5 秒）。
+        /// 只能在专用线程上调用，禁止在 MQTT 事件回调和线程池线程上调用，否则会造成线程池饥饿。
+        /// </summary>
+        public bool TryDequeueBlocking(out ForwardMessage? message, CancellationToken cancellationToken = default)
+        {
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (_channel.Reader.TryRead(out message))
+                {
+                    return true;
+                }
+
+                // 队列已关闭且已取空：返回 false 让消费循环正常退出。
+                // 注意 Channel 关闭发生在阻塞等待期间时本线程不会自行醒来，依赖取消令牌结束等待。
+                if (_channel.Reader.Completion.IsCompleted)
+                {
+                    message = null;
+                    return false;
+                }
+
+                // 同步阻塞等待入队信号。排空路径用 TryDequeueAsync 取走消息会留下多余信号，
+                // 此时本线程被唤醒后 TryRead 失败，会回到循环顶部继续等待：既不空转也不丢唤醒。
+                _itemsAvailable.Wait(cancellationToken);
+            }
         }
     }
 }

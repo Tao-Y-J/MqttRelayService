@@ -113,7 +113,7 @@ namespace MqttRelayService.Services.Implementations
                     var runCts = _cts;
                     for (int i = 0; i < needed; i++)
                     {
-                        _consumerTasks.Add(Task.Run(() => ConsumeLoopAsync(runCts.Token), runCts.Token));
+                        _consumerTasks.Add(StartConsumerThread(runCts.Token));
                     }
                 }
             }
@@ -160,13 +160,13 @@ namespace MqttRelayService.Services.Implementations
                 runCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 _cts = runCts;
 
-                // 物理池线程数初始仅拉起配置所需的消费者数量（或至少 1 个），并按并发硬上限收敛，
-                // 避免配置值大于硬上限时创建出大量只能空转轮询的消费者任务
+                // 消费者专用线程数初始仅拉起配置所需的数量（或至少 1 个），并按并发硬上限收敛，
+                // 避免配置值大于硬上限时创建出大量只能空转的消费者线程
                 handlerCount = Math.Clamp(_options.MaxConcurrentHandlers, 1, _throughputController.MaxConcurrencyHardLimit);
 
                 for (int i = 0; i < handlerCount; i++)
                 {
-                    _consumerTasks.Add(Task.Run(() => ConsumeLoopAsync(runCts.Token), runCts.Token));
+                    _consumerTasks.Add(StartConsumerThread(runCts.Token));
                 }
 
                 // 然后初始化吞吐控制器的默认最大并发数，这会触发事件，但此时需要的增补线程为 0，不会重复创建
@@ -409,33 +409,64 @@ namespace MqttRelayService.Services.Implementations
         }
 
         /// <summary>
-        /// 后台消费循环（使用 ChannelReader.ReadAllAsync 异步挂起等待）
+        /// 启动一个消费者专用线程。
+        /// 使用 <see cref="TaskCreationOptions.LongRunning"/> 提示调度器创建独立线程，而不是占用共享线程池线程；
+        /// 返回的 Task 在消费循环退出时完成，停机等待与消费者快照逻辑继续沿用 _consumerTasks。
         /// </summary>
-        private async Task ConsumeLoopAsync(CancellationToken cancellationToken)
+        private Task StartConsumerThread(CancellationToken cancellationToken)
+        {
+            return Task.Factory.StartNew(
+                () => ConsumeLoop(cancellationToken),
+                cancellationToken,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+        }
+
+        /// <summary>
+        /// 消费者专用线程入口：同步阻塞取件 + 同步等待单条消息处理完成。
+        /// 这里刻意不写成 async 方法：async 消费循环一旦 await，续体就会回到线程池，
+        /// 取件唤醒会被线程池繁忙程度拖慢（实测审计库查询打满线程池时，取件延迟从约 1ms 涨到 378ms，
+        /// 生产环境曾出现最大 3.5 秒）。因此消费者线程直接阻塞在队列取件信号上。
+        /// </summary>
+        private void ConsumeLoop(CancellationToken cancellationToken)
         {
             try
             {
-                await foreach (var message in _queue.ReadAllAsync(cancellationToken))
+                while (!cancellationToken.IsCancellationRequested)
                 {
-                    bool acquired = false;
+                    ForwardMessage? dequeued;
                     try
                     {
-                        // 协调暂停、动态并发和吞吐速率限制
-                        await _throughputController.WaitAsync(cancellationToken);
-                        acquired = true;
-
-                        // 处理单条消息，异常隔离
-                        await ProcessMessageAsync(message, cancellationToken);
+                        if (!_queue.TryDequeueBlocking(out dequeued, cancellationToken) || dequeued == null)
+                        {
+                            // 队列已关闭且已取空，正常退出
+                            break;
+                        }
                     }
                     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                     {
-                        await PreserveInFlightMessageAsync(message);
+                        break;
+                    }
+
+                    bool acquired = false;
+                    try
+                    {
+                        // 协调暂停、动态并发和吞吐速率限制：无限流且并发槽位充足时同步完成，不产生线程池续体
+                        _throughputController.WaitAsync(cancellationToken).GetAwaiter().GetResult();
+                        acquired = true;
+
+                        // 处理单条消息，异常隔离
+                        ProcessMessageAsync(dequeued, cancellationToken).GetAwaiter().GetResult();
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        PreserveInFlightMessageAsync(dequeued).GetAwaiter().GetResult();
                         break;
                     }
                     catch (Exception ex)
                     {
                         _logger.LogError(ex, "处理消息 {MessageId} 时发生未处理异常，继续执行",
-                            message.RouteContext.MessageId);
+                            dequeued.RouteContext.MessageId);
                     }
                     finally
                     {
@@ -496,7 +527,10 @@ namespace MqttRelayService.Services.Implementations
 
             try
             {
-                _logger.LogInformation("开始处理消息 {MessageId}，主题 {Topic}，来源 {ClientId}",
+                // 逐条消息日志按 Debug 记录：理由见 MqttBrokerHost.OnInterceptingPublishAsync 的同类注释。
+                // 「入队 → 取件」与「取件 → 发布完成」的耗时拆解需要逐条日志时，把 Serilog:MinimumLevel:Override
+                // 中本类别的级别调成 Debug 即可恢复；生产默认只保留事件级日志与审计库记录。
+                _logger.LogDebug("开始处理消息 {MessageId}，主题 {Topic}，来源 {ClientId}",
                     context.MessageId, context.Topic, context.SourceClientId);
 
                 // 路由阶段
@@ -512,7 +546,7 @@ namespace MqttRelayService.Services.Implementations
                 if (success)
                 {
                     message.Status = MessageProcessStatus.Succeeded;
-                    _logger.LogInformation("消息 {MessageId} 注入成功，匹配目标数 {TargetCount}",
+                    _logger.LogDebug("消息 {MessageId} 注入成功，匹配目标数 {TargetCount}",
                         context.MessageId, targets.Count);
                 }
                 else

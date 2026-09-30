@@ -41,6 +41,14 @@ namespace MqttRelayService.Services.Implementations
         private const int MaxPageNumber = 1000000;
 
         /// <summary>
+        /// 管理面读查询并发上限。
+        /// 审计表的 Count 与分页查询是阻塞型工作（几十万行上单次可达数百毫秒），而它们与消息投递消费者
+        /// 共享同一个线程池：实测 96 个并发 /api/messages 查询会把线程池线程占满，使投递取件延迟从约 1ms
+        /// 恶化到 378ms。上限取 4：仪表盘单客户端的并发查询不受影响，线程池占用被限制在可控范围。
+        /// </summary>
+        private const int MaxConcurrentReads = 4;
+
+        /// <summary>
         /// 收敛分页参数：页码不小于 1、页长限制在 [1, MaxPageSize]。
         /// </summary>
         private static void NormalizePaging(ref int page, ref int pageSize)
@@ -51,6 +59,11 @@ namespace MqttRelayService.Services.Implementations
         private readonly AuditStorageOptions _options;
         private readonly ILogger<AuditRepository> _logger;
         private readonly SemaphoreSlim _writeLock = new(1, 1);
+
+        /// <summary>
+        /// 管理面读查询闸门。只限制读路径，审计写入与清理不经过该闸门，避免影响正常审计落库。
+        /// </summary>
+        private readonly SemaphoreSlim _readGate = new(MaxConcurrentReads, MaxConcurrentReads);
         private readonly SqlSugarScope _db;
         private readonly string? _sqliteDataSourcePath;
 
@@ -461,6 +474,7 @@ namespace MqttRelayService.Services.Implementations
                 return null;
             }
 
+            await _readGate.WaitAsync();
             try
             {
                 await EnsureSchemaAsync();
@@ -472,6 +486,10 @@ namespace MqttRelayService.Services.Implementations
             {
                 _logger.LogError(ex, "按消息 ID {MessageId} 精确查询消息审计记录失败", messageId);
                 return null;
+            }
+            finally
+            {
+                _readGate.Release();
             }
         }
 
@@ -490,6 +508,7 @@ namespace MqttRelayService.Services.Implementations
         {
             NormalizePaging(ref page, ref pageSize);
 
+            await _readGate.WaitAsync();
             try
             {
                 await EnsureSchemaAsync();
@@ -520,6 +539,10 @@ namespace MqttRelayService.Services.Implementations
                 _logger.LogError(ex, "分页查询消息审计记录失败");
                 return (0, Array.Empty<MessageAuditRecord>());
             }
+            finally
+            {
+                _readGate.Release();
+            }
         }
 
         /// <summary>
@@ -534,6 +557,7 @@ namespace MqttRelayService.Services.Implementations
         {
             NormalizePaging(ref page, ref pageSize);
 
+            await _readGate.WaitAsync();
             try
             {
                 await EnsureSchemaAsync();
@@ -561,6 +585,10 @@ namespace MqttRelayService.Services.Implementations
                 _logger.LogError(ex, "分页查询客户端历史记录失败");
                 return (0, Array.Empty<ClientConnectionHistoryRecord>());
             }
+            finally
+            {
+                _readGate.Release();
+            }
         }
 
         /// <summary>
@@ -576,6 +604,7 @@ namespace MqttRelayService.Services.Implementations
         {
             recentCount = Math.Clamp(recentCount, 1, MaxPageSize);
 
+            await _readGate.WaitAsync();
             try
             {
                 await EnsureSchemaAsync();
@@ -599,6 +628,10 @@ namespace MqttRelayService.Services.Implementations
             {
                 _logger.LogError(ex, "获取 Dashboard 审计摘要失败");
                 return (0, 0, 0, 0, 0, Array.Empty<MessageAuditRecord>());
+            }
+            finally
+            {
+                _readGate.Release();
             }
         }
 

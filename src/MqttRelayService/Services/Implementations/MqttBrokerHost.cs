@@ -332,7 +332,10 @@ namespace MqttRelayService.Services.Implementations
 
                 if (enqueued)
                 {
-                    _logger.LogInformation("消息 {MessageId} 已入队，主题 {Topic}，来源 {ClientId}",
+                    // 逐条消息日志按 Debug 记录：1000 msg/s 下逐条 Information 会产生约 26MB/小时的写入，
+                    // 并在 Serilog 文件 sink 的全局锁上形成每秒数千次竞争。逐条消息的最终状态与耗时由审计库承担，
+                    // 需要逐条追踪时把 Serilog:MinimumLevel:Override 中本类别的级别调成 Debug。
+                    _logger.LogDebug("消息 {MessageId} 已入队，主题 {Topic}，来源 {ClientId}",
                         context.MessageId, context.Topic, e.ClientId);
                 }
                 else

@@ -161,5 +161,98 @@ namespace MqttRelayService.Tests
 
             Assert.Equal(MessageProcessStatus.Queued, message.Status);
         }
+
+        [Fact]
+        public async Task TryDequeueBlocking_ExistingMessage_ReturnsMessage()
+        {
+            var message = new ForwardMessage { MessageId = "msg-1", RouteContext = new RouteContext { Topic = "test/topic" } };
+            await _queue.EnqueueAsync(message);
+
+            var taken = _queue.TryDequeueBlocking(out var dequeued, CancellationToken.None);
+
+            Assert.True(taken);
+            Assert.Equal("msg-1", dequeued!.MessageId);
+        }
+
+        /// <summary>
+        /// 空队列时取件必须挂起等待，并在入队后被唤醒。
+        /// 这是消费者不再依赖线程池续体的核心行为：入队方直接释放取件信号唤醒专用线程。
+        /// </summary>
+        [Fact]
+        public async Task TryDequeueBlocking_EmptyQueue_BlocksUntilEnqueued()
+        {
+            var message = new ForwardMessage { MessageId = "msg-blocked", RouteContext = new RouteContext { Topic = "test/topic" } };
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            var blocked = Task.Run(() =>
+            {
+                var taken = _queue.TryDequeueBlocking(out var dequeued, cts.Token);
+                return (taken, dequeued);
+            });
+
+            // 队列为空时不能立即返回
+            var finishedEarly = await Task.WhenAny(blocked, Task.Delay(200));
+            Assert.NotSame(blocked, finishedEarly);
+
+            await _queue.EnqueueAsync(message);
+
+            var finished = await Task.WhenAny(blocked, Task.Delay(5000));
+            Assert.Same(blocked, finished);
+
+            var (taken, dequeued) = await blocked;
+            Assert.True(taken);
+            Assert.Equal("msg-blocked", dequeued!.MessageId);
+        }
+
+        [Fact]
+        public async Task TryDequeueBlocking_CancelledWhileBlocked_ThrowsOperationCanceled()
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+
+            var blocked = Task.Run(() => _queue.TryDequeueBlocking(out _, cts.Token));
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => blocked);
+        }
+
+        /// <summary>
+        /// 排空路径用 TryDequeueAsync 取走消息会留下多余的取件信号，
+        /// 残留信号只能造成一次无效唤醒，不能让取件提前返回，也不能让后续入队的消息丢唤醒。
+        /// </summary>
+        [Fact]
+        public async Task TryDequeueBlocking_WithResidualSignal_StillWaitsAndReceivesNextMessage()
+        {
+            await _queue.EnqueueAsync(new ForwardMessage { MessageId = "msg-1", RouteContext = new RouteContext { Topic = "test/topic" } });
+            await _queue.EnqueueAsync(new ForwardMessage { MessageId = "msg-2", RouteContext = new RouteContext { Topic = "test/topic" } });
+
+            // 排空路径取走第一条（不消耗取件信号）
+            var drained = await _queue.TryDequeueAsync();
+            Assert.Equal("msg-1", drained!.MessageId);
+
+            // 第二条仍能被同步取件拿到
+            var taken = _queue.TryDequeueBlocking(out var second, CancellationToken.None);
+            Assert.True(taken);
+            Assert.Equal("msg-2", second!.MessageId);
+
+            // 此时队列已空但残留两个信号：取件必须继续等待而不是空转返回
+            var message3 = new ForwardMessage { MessageId = "msg-3", RouteContext = new RouteContext { Topic = "test/topic" } };
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var pending = Task.Run(() =>
+            {
+                var ok = _queue.TryDequeueBlocking(out var dequeued, cts.Token);
+                return (ok, dequeued);
+            });
+
+            var finishedEarly = await Task.WhenAny(pending, Task.Delay(300));
+            Assert.NotSame(pending, finishedEarly);
+
+            await _queue.EnqueueAsync(message3);
+
+            var finished = await Task.WhenAny(pending, Task.Delay(5000));
+            Assert.Same(pending, finished);
+
+            var (ok, dequeued) = await pending;
+            Assert.True(ok);
+            Assert.Equal("msg-3", dequeued!.MessageId);
+        }
     }
 }

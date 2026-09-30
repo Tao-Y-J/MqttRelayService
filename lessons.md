@@ -91,6 +91,8 @@ powershell -ExecutionPolicy Bypass -NoProfile -Command "& '%~dp0install-service.
 
 ## 7. 主链路可靠性修复经验（2026-05-03）
 
+> 注：本节描述的消费循环退出方式（`ReadAllAsync`）已被第 12.1 节的「专用线程 + 同步阻塞取件」取代，取件机制一律以第 12 节为准。
+
 ### 6.1 BoundedChannelFullMode.DropWrite 陷阱
 
 **现象**：队列满时 `TryWrite` 返回 `true`，调用方以为入队成功，但消息实际被静默丢弃。
@@ -323,3 +325,33 @@ HostedService 注册顺序必须与停机顺序匹配：Host 按注册逆序停�
 
 - **事实**：`"ApiKey": null` 经配置绑定后 `WebOptions.ApiKey` 是 `""` 而不是 `null`。
 - **做法**：判断「未配置」必须用 `string.IsNullOrEmpty` / `string.IsNullOrWhiteSpace`，不要写 `== null`。`Program` 的 API Key 过滤器用的是 `IsNullOrEmpty`，行为本身正确；写测试时也不要断言 `Assert.Null`。
+
+## 12. 消息投递延迟与线程池（2026-10-01）
+
+### 12.1 基于 Channel 的异步等待，唤醒续体必然要占用线程池线程
+
+- **事实**：`ChannelReader.ReadAllAsync` 在默认 `BoundedChannelOptions`（`AllowSynchronousContinuations = false`）下，被挂起的读者由写者唤醒时续体被排到线程池；只有队列里恰好已有消息时 `TryRead` 才是同步路径。1000 msg/s、3 个消费者的实测形态是：每个消费者几乎都在挂起等待，于是**每条消息的取件都要等一个线程池工作项**。
+- **后果**：线程池线程被阻塞型工作占满时（实测用 96 个并发 `/api/messages` 在 188MB 审计库上查询复现），取件唤醒被推迟：`ThreadPool Completed Work Item Count` 从 5921/s 掉到 781/s，投递延迟 p99 从约 1ms 涨到 313ms、max 378ms；而 Broker 接收路径跑在 socket 接收循环（IOCP 完成线程）上不受影响，表现为「入队稳定 1000/s、消费者取件掉队再补账，但零丢包」。生产环境出现过最大 3.5 秒。
+- **结论**：只要「消费线程的唤醒」依赖线程池，投递延迟就与进程里任何阻塞型工作耦合。`ThreadPool.MinThreads` 抬高到 200 对这个问题**无效**（378ms → 363ms）：瓶颈是线程被占住，不是线程创建慢。
+- **做法**：给队列加一条真正的同步阻塞取件通道（`IMessageQueue.TryDequeueBlocking`），用 `SemaphoreSlim` 由入队方直接释放信号，阻塞线程由 OS 直接唤醒，不产生续体；消费者用 `TaskCreationOptions.LongRunning` 启动到专用线程，消费循环写成**同步**方法（async 循环里任何 `await` 都会把续体送回线程池，等于没改）。`SemaphoreSlim` 信号与真实条目数允许短暂不一致（排空路径 `TryDequeueAsync` 会留下多余信号），循环里「先 `TryRead` 再 `Wait`」可以做到既不多余返回也不丢唤醒。
+- **连带**：`TryDequeueBlocking` 只能出现在专用线程上。放到 MQTT 事件回调或线程池线程上就是阻塞线程池，属于反向恶化。
+- **回归防护**：`MessageDeliveryServiceTests.ConsumeLoop_RunsOnDedicatedThread_NotOnThreadPool` 在投递回调里断言 `Thread.CurrentThread.IsThreadPoolThread == false`，一旦有人把消费者改回 `Task.Run` 就会失败。
+
+### 12.2 以 LocalSystem 运行的 Windows 服务无法被外部 profiler 附着
+
+- **事实**：`dotnet-counters collect --process-id <服务PID>` 直接失败（`Another metrics collection session` 之外的真实原因是权限：服务 `SERVICE_START_NAME = LocalSystem`，非提权 shell 打不开诊断端口）。本轮定位只能另起一个隔离实例（复制发布目录、用环境变量 `Mqtt__TcpPort` / `Web__Port` 换端口、独立 `data` 目录）才拿到 counters。
+- **做法**：服务必须自带运行期自证手段。`/api/metrics` 的 `runtime` 段输出 `ThreadPool.ThreadCount`、`PendingWorkItemCount`、`CompletedWorkItemCount`、Gen0/1/2 次数、`GC.GetTotalPauseDuration()`、GC 堆大小与进程累计 CPU；每项独立兜底（失败记 -1），不允许影响观测接口本身。
+- **定位手法可复用**：延迟只可能落在「入队→取件」「取件→发布」两段时，直接把两端时间戳相减分类（本轮结论是 100% 在取件段、发布段 max 2ms）；再用服务公开 API 主动制造线程池压力即可稳定复现，不必等它自己偶发。
+
+### 12.3 隔离实例做对照实验的方法
+
+- **做法**：把 `bin\publish` 整目录复制到 `%TEMP%`，用 `Mqtt__TcpPort` / `Web__Port` 环境变量换端口，删掉复制出来的 `Logs` / `data` 保证两次实验起点一致（审计库为空），再跑同一个压测脚本，从服务自身日志按秒统计 `已入队` / `开始处理` / `注入成功` 三类行数。
+- **判据**：`enqueue` 每秒稳定而 `start/done` 掉队再补账 = 消费者侧问题，不是 Broker 侧；日志时间戳出现 >300ms 断层才说明整进程被冻结（本轮从未出现，可直接排除 GC 停顿与整进程挂起）。
+- **注意**：正在被其他进程写入的日志文件，`Get-ChildItem` 显示的目录项大小可能长期为 0（NTFS 不实时更新），读内容要用 `FileStream` 共享读，判断大小要等进程停止。
+
+### 12.4 逐条消息日志必须按 Debug 记录
+
+- **事实**：1000 msg/s 下「已入队 / 开始处理 / 注入成功」三行 `Information` 产生约 26MB/小时日志（180103 行），30 天保留窗口按「天数 × 24」个滚动文件计算会把 `Logs` 目录撑到十几 GB；同时 `Serilog.Sinks.File` 每条日志都在同一个全局锁上写入，实测 `Monitor Lock Contention Count` 稳定在 2200~2700 次/秒。
+- **做法**：三行改为 `LogDebug`，生产默认级别 `Information` 不写；逐条消息的最终状态、重试次数与处理耗时由审计库承担（`message_audit.LatencyMs` 就是「入队 → 发布完成」的服务侧耗时）。需要逐条追踪时不用改代码，在 `Serilog:MinimumLevel:Override` 里给 `MqttRelayService.Services.Implementations.MqttBrokerHost` 与 `...MessageDeliveryService` 配 `Debug` 即可。
+- **连带影响**：降级后日志里不再有逐秒的入队/取件计数，排查投递抖动要改用审计库按秒聚合 `LatencyMs` 或 `/api/metrics` 的 `runtime` 段。
+- **测试替身陷阱**：给 `TryDequeueBlocking` 写假实现时必须让它**挂起等待**，不能立刻返回 `false`。立刻返回会让消费者在 `StartAsync` 内部的 `UpdateMaxConcurrency` 之前就结束，而动态补线程逻辑（`OnConcurrencyChanged`）会清理已完成任务并按并发度补齐，于是又拉起一个消费者——`Verify(Times.Exactly(2))` 会在 2 次和 4 次之间随机跳。同理，等消费者线程真正跑起来要用条件轮询，不能用 `Task.Delay` 固定毫秒：整机负载高时 `LongRunning` 新线程可能还没运行就被取消。

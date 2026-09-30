@@ -1151,8 +1151,7 @@ namespace MqttRelayService.Tests
             var brokerHost = new RecordingBrokerHost();
 
             var channel = Channel.CreateUnbounded<ForwardMessage>();
-            queueMock.Setup(q => q.ReadAllAsync(It.IsAny<CancellationToken>()))
-                .Returns(channel.Reader.ReadAllAsync());
+            SetupBlockingDequeue(queueMock, channel.Reader);
 
             var startTimes = new ConcurrentBag<long>();
             var stopwatch = System.Diagnostics.Stopwatch.StartNew();
@@ -1192,7 +1191,7 @@ namespace MqttRelayService.Tests
             channel.Writer.TryWrite(CreateTestMessage());
             channel.Writer.Complete();
 
-            await Task.Delay(200);
+            await WaitForConditionAsync(() => startTimes.Count >= 3, "期望处理 3 条消息，消费者未在超时内完成处理");
             await service.StopAsync(CancellationToken.None);
 
             var times = startTimes.ToArray();
@@ -1210,8 +1209,7 @@ namespace MqttRelayService.Tests
             var brokerHost = new RecordingBrokerHost();
 
             var channel = Channel.CreateUnbounded<ForwardMessage>();
-            queueMock.Setup(q => q.ReadAllAsync(It.IsAny<CancellationToken>()))
-                .Returns(channel.Reader.ReadAllAsync());
+            SetupBlockingDequeue(queueMock, channel.Reader);
 
             var startTimes = new ConcurrentBag<long>();
             var stopwatch = System.Diagnostics.Stopwatch.StartNew();
@@ -1251,7 +1249,7 @@ namespace MqttRelayService.Tests
             channel.Writer.TryWrite(CreateTestMessage());
             channel.Writer.Complete();
 
-            await Task.Delay(200);
+            await WaitForConditionAsync(() => startTimes.Count >= 3, "期望处理 3 条消息，消费者未在超时内完成处理");
             await service.StopAsync(CancellationToken.None);
 
             var times = startTimes.ToArray();
@@ -1269,8 +1267,19 @@ namespace MqttRelayService.Tests
             var routerMock = new Mock<IMessageRouter>();
             var brokerHost = new RecordingBrokerHost();
 
-            queueMock.Setup(q => q.ReadAllAsync(It.IsAny<CancellationToken>()))
-                .Returns(GetEmptyAsyncEnumerable());
+            // 取件替身必须像真实消费者一样挂起等待，直到停机取消：如果取件立刻返回 false，
+            // 消费者会在 StartAsync 内部的 UpdateMaxConcurrency 之前就结束，动态补线程逻辑会再拉起一个消费者，
+            // 调用次数随之抖动（实测在 2 和 4 次之间跳）。这里显式计数并阻塞，保证每个消费者只调用一次取件。
+            var dequeueCalls = 0;
+            queueMock
+                .Setup(q => q.TryDequeueBlocking(out It.Ref<ForwardMessage?>.IsAny, It.IsAny<CancellationToken>()))
+                .Returns(new TryDequeueBlockingCallback((out ForwardMessage? message, CancellationToken cancellationToken) =>
+                {
+                    Interlocked.Increment(ref dequeueCalls);
+                    message = null;
+                    cancellationToken.WaitHandle.WaitOne();
+                    throw new OperationCanceledException(cancellationToken);
+                }));
 
             var service = new MessageDeliveryService(
                 queueMock.Object,
@@ -1292,14 +1301,103 @@ namespace MqttRelayService.Tests
                 new Mock<ILogger<MessageDeliveryService>>().Object);
 
             await service.StartAsync(CancellationToken.None);
-            await Task.Delay(100);
+            await WaitForConditionAsync(() => Volatile.Read(ref dequeueCalls) >= 1, "第一次 StartAsync 后消费者未开始取件");
             await service.StopAsync(CancellationToken.None);
 
             await service.StartAsync(CancellationToken.None);
-            await Task.Delay(100);
+            await WaitForConditionAsync(() => Volatile.Read(ref dequeueCalls) >= 2, "第二次 StartAsync 后消费者未开始取件");
             await service.StopAsync(CancellationToken.None);
 
-            queueMock.Verify(q => q.ReadAllAsync(It.IsAny<CancellationToken>()), Times.Exactly(2));
+            queueMock.Verify(
+                q => q.TryDequeueBlocking(out It.Ref<ForwardMessage?>.IsAny, It.IsAny<CancellationToken>()),
+                Times.Exactly(2));
+        }
+
+        /// <summary>
+        /// 等待条件成立，用于等待消费者专用线程真正开始工作。
+        /// 消费者由 LongRunning 启动到新线程上，启动时刻由调度器决定：整机负载高时，
+        /// 先 Task.Delay 固定毫秒再停机或断言，可能出现"线程还没运行"的假失败。
+        /// </summary>
+        private static async Task WaitForConditionAsync(Func<bool> condition, string failureMessage, int timeoutMs = 10000)
+        {
+            var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+            while (!condition())
+            {
+                if (DateTime.UtcNow > deadline)
+                {
+                    throw new TimeoutException($"{failureMessage}（等待 {timeoutMs}ms 超时）");
+                }
+
+                await Task.Delay(10);
+            }
+        }
+
+        /// <summary>
+        /// 消费循环必须运行在专用线程上，而不是共享线程池线程。
+        /// 回归背景：消费者曾经以 Task.Run + ChannelReader.ReadAllAsync 方式挂起等待，
+        /// 唤醒续体必须排到线程池；实测审计库查询把线程池占满时，取件延迟从约 1ms 恶化到 378ms，
+        /// 生产环境出现过最大 3.5 秒。若这里断言失败，说明消费者又回到了线程池上。
+        /// </summary>
+        [Fact]
+        public async Task ConsumeLoop_RunsOnDedicatedThread_NotOnThreadPool()
+        {
+            var queueMock = new Mock<IMessageQueue>();
+            var routerMock = new Mock<IMessageRouter>();
+            var brokerHost = new RecordingBrokerHost();
+
+            var deliveredCount = 0;
+            queueMock
+                .Setup(q => q.TryDequeueBlocking(out It.Ref<ForwardMessage?>.IsAny, It.IsAny<CancellationToken>()))
+                .Returns(new TryDequeueBlockingCallback((out ForwardMessage? message, CancellationToken ct) =>
+                {
+                    if (Interlocked.Increment(ref deliveredCount) == 1)
+                    {
+                        message = CreateTestMessage();
+                        return true;
+                    }
+
+                    // 第二条起挂起等待，直到 StopAsync 取消令牌
+                    ct.WaitHandle.WaitOne();
+                    message = null;
+                    return false;
+                }));
+
+            routerMock.Setup(r => r.RouteAsync(It.IsAny<RouteContext>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<ForwardResult> { new() { TargetClientId = "client-2", Success = true } });
+
+            var service = new MessageDeliveryService(
+                queueMock.Object,
+                routerMock.Object,
+                brokerHost,
+                new Mock<IDeadLetterService>().Object,
+                new Mock<IRetryPolicyProvider>().Object,
+                Microsoft.Extensions.Options.Options.Create(new ReliabilityOptions
+                {
+                    QueueCapacity = 10,
+                    MaxRetryCount = 3,
+                    RetryBaseDelayMs = 10,
+                    RetryMaxDelayMs = 100,
+                    ForwardTimeoutMs = 5000,
+                    ShutdownDrainTimeoutMs = 2000,
+                    DropWhenQueueFull = false,
+                    MaxConcurrentHandlers = 1
+                }),
+                new Mock<ILogger<MessageDeliveryService>>().Object);
+
+            await service.StartAsync(CancellationToken.None);
+
+            var deadline = DateTime.UtcNow.AddSeconds(5);
+            while (brokerHost.PublishRanOnThreadPoolThread == null && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(20);
+            }
+
+            await service.StopAsync(CancellationToken.None);
+
+            Assert.NotNull(brokerHost.PublishRanOnThreadPoolThread);
+            Assert.False(
+                brokerHost.PublishRanOnThreadPoolThread!.Value,
+                "投递处理必须发生在消费者专用线程上，出现线程池线程说明消费循环又回到了线程池续体模型");
         }
 
         [Fact]
@@ -1396,11 +1494,61 @@ namespace MqttRelayService.Tests
 
         #endregion
 
+        /// <summary>
+        /// TryDequeueBlocking 的 Moq 回调委托。Moq 对含 out 参数的方法只能用委托形式给出返回值。
+        /// </summary>
+        private delegate bool TryDequeueBlockingCallback(out ForwardMessage? message, CancellationToken cancellationToken);
+
+        /// <summary>
+        /// 为队列测试替身装配同步阻塞取件：按 Channel 中消息的顺序返回，
+        /// Channel 被 Complete 或令牌取消后返回 false，让消费循环正常退出。
+        /// 这里必须在委托内部真正阻塞等待，否则消费者线程会立即退出，
+        /// "处理了 N 条消息"这类断言就会失去意义。
+        /// </summary>
+        private static void SetupBlockingDequeue(Mock<IMessageQueue> queueMock, ChannelReader<ForwardMessage> reader)
+        {
+            queueMock
+                .Setup(q => q.TryDequeueBlocking(out It.Ref<ForwardMessage?>.IsAny, It.IsAny<CancellationToken>()))
+                .Returns(new TryDequeueBlockingCallback((out ForwardMessage? message, CancellationToken cancellationToken) =>
+                {
+                    while (!cancellationToken.IsCancellationRequested)
+                    {
+                        if (reader.TryRead(out message))
+                        {
+                            return true;
+                        }
+
+                        var waitToRead = reader.WaitToReadAsync(cancellationToken).AsTask();
+                        try
+                        {
+                            if (!waitToRead.GetAwaiter().GetResult())
+                            {
+                                // Channel 已 Complete 且取空
+                                break;
+                            }
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            break;
+                        }
+                    }
+
+                    message = null;
+                    return false;
+                }));
+        }
+
         private class RecordingBrokerHost : IMqttBrokerHost
         {
             public bool PublishCalled { get; private set; }
             public string? LastSourceClientId { get; private set; }
             public int PublishCallCount { get; private set; }
+
+            /// <summary>
+            /// 投递调用所在线程是否为线程池线程；未发生过投递时为 null。
+            /// 用于回归验证消费者运行在专用线程上。
+            /// </summary>
+            public bool? PublishRanOnThreadPoolThread { get; private set; }
 
             /// <summary>
             /// 是否已调用停机封堵入口，用于断言停机顺序为先封堵再排空。
@@ -1422,6 +1570,7 @@ namespace MqttRelayService.Tests
                 PublishCalled = true;
                 PublishCallCount++;
                 LastSourceClientId = sourceClientId;
+                PublishRanOnThreadPoolThread = Thread.CurrentThread.IsThreadPoolThread;
                 return Task.FromResult(true);
             }
         }

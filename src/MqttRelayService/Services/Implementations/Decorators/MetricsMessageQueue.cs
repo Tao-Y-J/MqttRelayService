@@ -97,6 +97,14 @@ namespace MqttRelayService.Services.Implementations.Decorators
             return _inner.TryDequeueAsync(cancellationToken);
         }
 
+        /// <summary>
+        /// 同步阻塞取件直接透传给被装饰队列：该调用会阻塞调用线程，装饰器必须保持最薄的一层。
+        /// </summary>
+        public bool TryDequeueBlocking(out ForwardMessage? message, CancellationToken cancellationToken = default)
+        {
+            return _inner.TryDequeueBlocking(out message, cancellationToken);
+        }
+
         public IAsyncEnumerable<ForwardMessage> ReadAllAsync(CancellationToken cancellationToken = default)
         {
             return _inner.ReadAllAsync(cancellationToken);

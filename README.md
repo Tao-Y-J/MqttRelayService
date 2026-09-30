@@ -256,6 +256,8 @@ Web 管理面的安全边界完全依赖网络可达性与 `Web:ApiKey`：服务
 - **有界审计待写队列**：审计待写队列上限 50000 条，客户端历史待写队列上限 10000 条；两者超限都丢弃新记录并写入日志，不使用无界队列
 - **有界审计数据**：审计数据按 `AuditStorage:RetentionDays`（默认 30 天）自动清理，启动清理一次后每天至少一次；清理后按 `VacuumAfterCleanup` 回收 SQLite 文件空间
 - **异常隔离**：单条消息处理失败不会导致消费者退出或其他消息受影响
+- **投递与线程池解耦**：消费者运行在专用线程上（`TaskCreationOptions.LongRunning`，数量等于投递并发度），取件用 `TryDequeueBlocking` 的同步信号唤醒，不经过线程池续体；因此管理面审计查询等阻塞型工作不会拖慢消息投递
+- **管理面读查询隔离**：审计仓储的读方法（按 ID 查询、分页、Dashboard 摘要）并发上限固定为 4，写路径与清理不受该上限约束
 - **确定性停机顺序**：先封堵客户端新发布入口（`StopAcceptingClientPublishes`，Broker 保持运行）→ 取消消费者 → 多轮排空队列（Broker 仍在运行，排空阶段仍能向订阅者注入消息）→ 排空结束后才由 BrokerWorker 停止 Broker
 
 停机顺序不可颠倒：如果先停 Broker，排空阶段无法再注入消息，剩余消息只能进入死信或丢失。
@@ -329,3 +331,5 @@ Web 管理面的安全边界完全依赖网络可达性与 `Web:ApiKey`：服务
 - **文件**：程序基目录（`AppContext.BaseDirectory`）下的 `Logs` 目录，按小时滚动，滚动文件名为 `relay-YYYYMMDDHH.log`（前缀由 `Serilog:FileNamePrefix` 决定）
 
 `Serilog:RetentionDays` 按“天数 × 24”换算成保留的小时文件数量上限。`Serilog:IncludeCallerInfo=true` 时日志行额外输出 `{Caller}` 字段（每条日志解析 StackTrace，默认关闭）。日志级别通过 `Serilog:MinimumLevel:Default` 与 `Serilog:MinimumLevel:Override` 调整。
+
+逐条消息的「已入队 / 开始处理 / 注入成功」三行按 `Debug` 记录，生产默认（`Default: Information`）不写。原因是 1000 msg/s 下逐条 `Information` 会产生约 26MB/小时的日志文件，并在文件 sink 的全局锁上形成每秒数千次竞争；逐条消息的最终状态、重试次数与处理耗时已由审计库（`/api/messages`）承担。需要逐条追踪时，在 `Serilog:MinimumLevel:Override` 里把 `MqttRelayService.Services.Implementations.MqttBrokerHost` 与 `MqttRelayService.Services.Implementations.MessageDeliveryService` 设为 `Debug` 即可，不需要改代码。

@@ -944,7 +944,7 @@ MQTT 事件回调中不得直接执行复杂、耗时或不稳定逻辑。
 服务停止时按以下实际顺序执行：
 
 1. `DeliveryWorker` 最先停止（Host 逆序停止注册时最后加入的后台服务），`MessageDeliveryService.StopAsync` 第一步调用 `IMqttBrokerHost.StopAcceptingClientPublishes()` 封堵客户端新发布入口
-2. 取消消费者循环的 `ReadAllAsync`，等待消费者退出（消费者取消时把在途消息保留回队列）
+2. 取消消费者循环的阻塞取件等待（`MessageDeliveryService.ConsumeLoop` 阻塞在 `IMessageQueue.TryDequeueBlocking` 上，取消令牌使其退出），等待消费者退出（消费者取消时把在途消息保留回队列）
 3. 等待后台重试调度任务收敛
 4. 多轮收敛排空队列：先 drain 一轮，若仍有未退出消费者则用剩余排空预算等待其结束并再次 drain，直到队列空且消费者全部退出，或 `Reliability:ShutdownDrainTimeoutMs` 耗尽
 5. 记录排空计数（含转入死信条数）与剩余未处理数量

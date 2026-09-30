@@ -1107,6 +1107,7 @@ namespace MqttRelayService.Services.Implementations
                         MemoryUsageMb = process != null ? Math.Round(process.WorkingSet64 / 1024.0 / 1024.0, 2) : 0,
                         Timestamp = DateTime.Now.ToString("o")
                     },
+                    Runtime = BuildRuntimeSnapshot(process),
                     Counters = new
                     {
                         TotalReceived = totalReceived,
@@ -1235,6 +1236,7 @@ namespace MqttRelayService.Services.Implementations
                     Timestamp = DateTime.Now.ToString("o"),
                     Degraded = true
                 },
+                Runtime = BuildRuntimeSnapshot(null),
                 Counters = new
                 {
                     TotalReceived = Interlocked.Read(ref _totalReceived),
@@ -1258,6 +1260,62 @@ namespace MqttRelayService.Services.Implementations
                     EnableDeadLetter = _reliabilityOptions.EnableDeadLetter,
                     DeadLetterPath = _reliabilityOptions.DeadLetterPath
                 }
+            };
+        }
+
+        /// <summary>
+        /// 采集进程运行期指标。用途是在故障现场自证资源瓶颈：以 LocalSystem 运行的 Windows 服务
+        /// 不允许外部 profiler 附着（本轮投递延迟定位即因此只能依赖隔离实例采集 counters），
+        /// 因此线程池与 GC 状态必须由服务自己上报。
+        /// 每一项都单独兜底：任何一项取值失败都不允许让 Dashboard 接口失败，失败项返回 -1。
+        /// </summary>
+        private static object BuildRuntimeSnapshot(Process? process)
+        {
+            double gcPauseTotalMs;
+            try
+            {
+                gcPauseTotalMs = Math.Round(GC.GetTotalPauseDuration().TotalMilliseconds, 2);
+            }
+            catch (Exception)
+            {
+                gcPauseTotalMs = -1;
+            }
+
+            long heapBytes;
+            try
+            {
+                heapBytes = GC.GetTotalMemory(forceFullCollection: false);
+            }
+            catch (Exception)
+            {
+                heapBytes = -1;
+            }
+
+            double processCpuTotalMs = -1;
+            try
+            {
+                if (process != null)
+                {
+                    processCpuTotalMs = Math.Round(process.TotalProcessorTime.TotalMilliseconds, 2);
+                }
+            }
+            catch (Exception)
+            {
+                processCpuTotalMs = -1;
+            }
+
+            return new
+            {
+                ProcessorCount = Environment.ProcessorCount,
+                ThreadPoolThreadCount = ThreadPool.ThreadCount,
+                ThreadPoolPendingWorkItems = ThreadPool.PendingWorkItemCount,
+                ThreadPoolCompletedWorkItems = ThreadPool.CompletedWorkItemCount,
+                Gen0Collections = GC.CollectionCount(0),
+                Gen1Collections = GC.CollectionCount(1),
+                Gen2Collections = GC.CollectionCount(2),
+                GcPauseTotalMs = gcPauseTotalMs,
+                GcHeapMb = heapBytes >= 0 ? Math.Round(heapBytes / 1024.0 / 1024.0, 2) : -1,
+                ProcessCpuTotalMs = processCpuTotalMs
             };
         }
 
