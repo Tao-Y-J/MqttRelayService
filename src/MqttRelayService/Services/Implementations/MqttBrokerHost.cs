@@ -34,9 +34,19 @@ namespace MqttRelayService.Services.Implementations
         private readonly ILogger<MqttBrokerHost> _logger;
         private readonly ConcurrentDictionary<string, byte> _injectedMessageIds = new();
 
+        /// <summary>
+        /// MQTT Server 创建/启动的生命周期互斥锁，避免并发启动创建出两个 Server 实例。
+        /// </summary>
+        private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
+
         private MqttServer? _mqttServer;
         private bool _disposed;
         private int _injectedMessageIdOverflowLogged;
+
+        /// <summary>
+        /// 是否仍然接受客户端新发布。停机排空前置为 false，阻断新消息进入内部队列。
+        /// </summary>
+        private volatile bool _acceptingClientPublishes = true;
 
         public MqttBrokerHost(
             IAuthService authService,
@@ -64,14 +74,19 @@ namespace MqttRelayService.Services.Implementations
         /// </summary>
         public async Task StartAsync(CancellationToken cancellationToken = default)
         {
-            if (_mqttServer?.IsStarted == true)
-            {
-                _logger.LogWarning("MQTT Server 已经处于运行状态");
-                return;
-            }
-
+            await _lifecycleLock.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
+                if (_mqttServer?.IsStarted == true)
+                {
+                    _logger.LogWarning("MQTT Server 已经处于运行状态");
+                    return;
+                }
+
+                // 进程内重启（BrokerWorker 监控自动重启）时先释放上一次的 Server 实例，避免句柄与内存泄漏
+                _mqttServer?.Dispose();
+                _mqttServer = null;
+
                 var factory = new MqttServerFactory();
                 var serverOptions = new MqttServerOptionsBuilder()
                     .WithDefaultEndpoint()
@@ -91,12 +106,19 @@ namespace MqttRelayService.Services.Implementations
 
                 await _mqttServer.StartAsync();
 
+                // 每次启动（含进程内自动重启）都重新放开客户端发布入口
+                _acceptingClientPublishes = true;
+
                 _logger.LogInformation("MQTT Server 已启动，监听端口 {Port}", _options.TcpPort);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "启动 MQTT Server 失败");
                 throw;
+            }
+            finally
+            {
+                _lifecycleLock.Release();
             }
         }
 
@@ -105,14 +127,19 @@ namespace MqttRelayService.Services.Implementations
         /// </summary>
         public async Task StopAsync(CancellationToken cancellationToken = default)
         {
-            if (_mqttServer == null || !_mqttServer.IsStarted)
-            {
-                return;
-            }
-
+            await _lifecycleLock.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                // 取消事件订阅
+                if (_mqttServer == null || !_mqttServer.IsStarted)
+                {
+                    return;
+                }
+
+                // 先停止 Server 停止事件流，再解绑事件处理器：
+                // 反序解绑会在通知窗口内让客户端发布落入 Broker 默认分发路径（绕过队列、审计、重试、死信与 EchoToSender 控制）。
+                _acceptingClientPublishes = false;
+                await _mqttServer.StopAsync();
+
                 _mqttServer.ValidatingConnectionAsync -= OnValidatingConnectionAsync;
                 _mqttServer.InterceptingPublishAsync -= OnInterceptingPublishAsync;
                 _mqttServer.InterceptingSubscriptionAsync -= OnInterceptingSubscriptionAsync;
@@ -121,13 +148,24 @@ namespace MqttRelayService.Services.Implementations
                 _mqttServer.ClientConnectedAsync -= OnClientConnectedAsync;
                 _mqttServer.ClientDisconnectedAsync -= OnClientDisconnectedAsync;
 
-                await _mqttServer.StopAsync();
                 _logger.LogInformation("MQTT Server 已停止");
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "停止 MQTT Server 时发生异常");
             }
+            finally
+            {
+                _lifecycleLock.Release();
+            }
+        }
+
+        /// <summary>
+        /// 封堵客户端新发布入口，但不停止 Broker 本身，供停机排空前调用。
+        /// </summary>
+        public void StopAcceptingClientPublishes()
+        {
+            _acceptingClientPublishes = false;
         }
 
         /// <summary>
@@ -152,26 +190,29 @@ namespace MqttRelayService.Services.Implementations
                 var messageBuilder = new MqttApplicationMessageBuilder()
                     .WithTopic(topic)
                     .WithPayload(payload)
-                    .WithQualityOfServiceLevel((MqttQualityOfServiceLevel)qos)
+                    // QoS 非法时回退到 Mqtt:DefaultQos，保证配置项真实生效且注入不会因越界 QoS 失败
+                    .WithQualityOfServiceLevel((MqttQualityOfServiceLevel)(qos is >= 0 and <= 2 ? qos : _options.DefaultQos))
                     .WithRetainFlag(retain);
 
-                string? relayMessageId = null;
+                // 所有服务端注入都必须携带可识别的转发标记（即使没有源客户端）：
+                // 这样发布拦截器才能稳定区分"服务端注入"与"客户端原始发布"，
+                // 不会把注入消息误当客户端发布重新入队，也不会因缺少源标识而丢弃。
+                var relayMessageId = Guid.NewGuid().ToString("N");
+
+                // 防止注入消息 ID 跟踪字典无界增长：超限时触发一次性清理，避免内存泄漏
+                if (!TryTrackInjectedMessageId(relayMessageId))
+                {
+                    // 跟踪失败意味着字典已满且无法清理旧条目——继续执行转发但无法 EchoToSender 过滤
+                    _logger.LogError("注入消息 ID 跟踪字典溢出，消息 {RelayMessageId} 无法被 EchoToSender 出站拦截识别",
+                        relayMessageId);
+                }
+
+                messageBuilder.WithUserProperty(RelayMessageIdUserPropertyName, Encoding.UTF8.GetBytes(relayMessageId));
 
                 // 如果指定了源客户端 ID，附加到 UserProperties 以便出站拦截器识别
                 if (!string.IsNullOrEmpty(sourceClientId))
                 {
-                    relayMessageId = Guid.NewGuid().ToString("N");
-
-                    // 防止注入消息 ID 跟踪字典无界增长：超限时触发一次性清理，避免内存泄漏
-                    if (!TryTrackInjectedMessageId(relayMessageId))
-                    {
-                        // 跟踪失败意味着字典已满且无法清理旧条目——继续执行转发但无法 EchoToSender 过滤
-                        _logger.LogError("注入消息 ID 跟踪字典溢出，消息 {RelayMessageId} 无法被 EchoToSender 出站拦截识别",
-                            relayMessageId);
-                    }
-
                     messageBuilder.WithUserProperty(SourceClientIdUserPropertyName, Encoding.UTF8.GetBytes(sourceClientId));
-                    messageBuilder.WithUserProperty(RelayMessageIdUserPropertyName, Encoding.UTF8.GetBytes(relayMessageId));
                 }
 
                 var message = messageBuilder.Build();
@@ -183,11 +224,7 @@ namespace MqttRelayService.Services.Implementations
                 }
                 catch
                 {
-                    if (relayMessageId != null)
-                    {
-                        _injectedMessageIds.TryRemove(relayMessageId, out _);
-                    }
-
+                    _injectedMessageIds.TryRemove(relayMessageId, out _);
                     throw;
                 }
 
@@ -241,6 +278,25 @@ namespace MqttRelayService.Services.Implementations
             if (IsRelayInjectedMessage(e.ApplicationMessage))
             {
                 // 服务端注入的转发消息需要继续交给 Broker 分发，避免再次进入内部队列形成循环。
+                return;
+            }
+
+            // 无客户端标识的发布无法归属到任何会话（注入消息跟踪项未命中时即属此类）。
+            // 这类消息若按客户端发布处理，会以空 ClientId 更新活动时间并为转发丢失 SourceClientId，
+            // 因此直接阻断默认分发并丢弃，防止绕过内部管道或形成转发循环。
+            if (string.IsNullOrEmpty(e.ClientId))
+            {
+                e.ProcessPublish = false;
+                _logger.LogWarning("收到无来源标识的发布，Topic={Topic}，已阻断默认分发", e.ApplicationMessage.Topic);
+                return;
+            }
+
+            // 停机排空期间封堵新的客户端发布入口：阻断默认分发且不入队，保证 drain 阶段队列不再增长。
+            if (!_acceptingClientPublishes)
+            {
+                e.ProcessPublish = false;
+                _logger.LogWarning("服务正在停机，已拒绝客户端 {ClientId} 的新发布，Topic={Topic}",
+                    e.ClientId, e.ApplicationMessage.Topic);
                 return;
             }
 

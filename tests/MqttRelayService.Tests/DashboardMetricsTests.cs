@@ -49,6 +49,39 @@ namespace MqttRelayService.Tests
         }
 
         [Fact]
+        public async Task MetricsService_RecordForwarded_MultipleRetryAttempts_ShouldCountEachAttemptOnce()
+        {
+            using var metricsService = new MetricsService(
+                _queue,
+                _mockClientRegistry.Object,
+                _serviceOptions,
+                _mqttOptions,
+                _reliabilityOptions,
+                _mockLogger.Object);
+
+            var context = new RouteContext
+            {
+                MessageId = "msg_retry",
+                Topic = "test/retry",
+                Payload = new byte[] { 7 },
+                QoS = 1,
+                SourceClientId = "client_retry",
+                Timestamp = DateTime.Now
+            };
+
+            // 同一条消息连续 3 次带累计重试次数的转发尝试（1、2、3）
+            metricsService.RecordForwarded(context, success: false, retryCount: 1, latencyMs: 1);
+            metricsService.RecordForwarded(context, success: false, retryCount: 2, latencyMs: 1);
+            metricsService.RecordForwarded(context, success: true, retryCount: 3, latencyMs: 1);
+
+            var result = await metricsService.GetDashboardDataAsync();
+            dynamic data = result;
+
+            // 早期实现会把累计值累加成 1+2+3=6，导致重试计数虚高
+            Assert.Equal(3L, (long)data.Counters.TotalRetries);
+        }
+
+        [Fact]
         public async Task MetricsService_RecordReceived_ShouldIncrementCounterAndAddLog()
         {
             // Arrange
@@ -126,7 +159,10 @@ namespace MqttRelayService.Tests
             dynamic data = result;
             Assert.Equal(1L, (long)data.Counters.TotalSucceeded);
             Assert.Equal(1L, (long)data.Counters.TotalFailed);
-            Assert.Equal(2L, (long)data.Counters.TotalRetries);
+
+            // TotalRetries 统计的是“重试尝试次数”：retryCount 参数是累计值，
+            // 只对 1 次带重试的转发尝试计数，才能与审计表的 RetryCount 列口径一致。
+            Assert.Equal(1L, (long)data.Counters.TotalRetries);
 
             // 验证在内存日志中，相同 MessageId 仅保留了最终状态（可变就地更新）
             var logs = (List<object>)data.Logs;
@@ -1066,6 +1102,104 @@ namespace MqttRelayService.Tests
 
             // Assert：异常被吞掉并降级返回，不冒泡
             Assert.NotNull(dashboard);
+        }
+
+        [Fact]
+        public void MetricsService_CachePayload_EmptyPayloadBurst_ShouldStayBounded()
+        {
+            using var metricsService = new MetricsService(
+                _queue,
+                _mockClientRegistry.Object,
+                _serviceOptions,
+                _mqttOptions,
+                _reliabilityOptions,
+                _mockLogger.Object);
+
+            // 空载荷发布是合法 MQTT 语义（例如清除 Retained 消息），
+            // 早期实现只在非空载荷分支登记驱逐键，导致这些条目永久驻留形成无界内存增长。
+            for (var i = 0; i < 500; i++)
+            {
+                metricsService.RecordReceived(new ForwardMessage
+                {
+                    MessageId = $"empty_{i}",
+                    RouteContext = new RouteContext
+                    {
+                        MessageId = $"empty_{i}",
+                        Topic = "test/empty",
+                        Payload = Array.Empty<byte>(),
+                        QoS = 0,
+                        SourceClientId = "client_empty",
+                        Timestamp = DateTime.Now
+                    }
+                });
+            }
+
+            Assert.True(metricsService.CachedPayloadCount <= 100,
+                $"载荷缓存必须始终有界，实际条目数 {metricsService.CachedPayloadCount}");
+            Assert.True(metricsService.MessageLogCount <= 100,
+                $"内存消息日志必须始终有界，实际条目数 {metricsService.MessageLogCount}");
+        }
+
+        [Fact]
+        public async Task MetricsMessageQueue_EnqueueAsync_WhenInnerEnqueueFails_ShouldPersistRejectedTerminalState()
+        {
+            var persisted = new TaskCompletionSource<MessageAuditRecord>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            _mockAuditRepository
+                .Setup(r => r.RecordMessageAuditsAsync(It.IsAny<IReadOnlyList<MessageAuditRecord>>()))
+                .Callback<IReadOnlyList<MessageAuditRecord>>(records =>
+                {
+                    foreach (var record in records)
+                    {
+                        if (record.Status == "Rejected")
+                        {
+                            persisted.TrySetResult(record);
+                        }
+                    }
+                })
+                .Returns(Task.CompletedTask);
+
+            using var metricsService = new MetricsService(
+                _queue,
+                _mockClientRegistry.Object,
+                _serviceOptions,
+                _mqttOptions,
+                _reliabilityOptions,
+                _mockAuditRepository.Object,
+                _mockLogger.Object);
+
+            var failingQueue = new Mock<IMessageQueue>();
+            failingQueue.Setup(q => q.EnqueueAsync(It.IsAny<ForwardMessage>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(false);
+
+            var decorator = new MetricsMessageQueue(failingQueue.Object, metricsService);
+
+            var message = new ForwardMessage
+            {
+                MessageId = "rejected_msg",
+                RouteContext = new RouteContext
+                {
+                    MessageId = "rejected_msg",
+                    Topic = "test/rejected",
+                    Payload = new byte[] { 1 },
+                    QoS = 1,
+                    SourceClientId = "client_rejected",
+                    Timestamp = DateTime.Now
+                },
+                Status = MessageProcessStatus.Received
+            };
+
+            var result = await decorator.EnqueueAsync(message);
+
+            Assert.False(result);
+
+            // 入队失败必须写入终态审计，否则该消息会在审计表里永久停留 Queued，让 Dashboard 待处理数虚高。
+            var completed = await Task.WhenAny(persisted.Task, Task.Delay(TimeSpan.FromSeconds(2)));
+            Assert.True(completed == persisted.Task, "入队失败的消息应写入 Rejected 终态审计记录");
+
+            var record = await persisted.Task;
+            Assert.Equal("Rejected", record.Status);
+            Assert.False(string.IsNullOrWhiteSpace(record.ErrorMessage));
         }
 
         private static ConcurrentDictionary<string, MessageAuditRecord> GetPendingAudits(MetricsService metricsService)

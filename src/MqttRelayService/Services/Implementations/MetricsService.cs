@@ -20,9 +20,13 @@ namespace MqttRelayService.Services.Implementations
     public class MetricsService : IMetricsService, IDisposable
     {
         private const int MaxLogCount = 100;
+        private const int MaxPayloadCount = 100;
         private const int MaxHistorySnapshots = 60; // 2秒一次，保存120秒（2分钟）的历史
         private const int AuditFlushBatchSize = 1000;
         private const int MaxPendingAudits = 50000; // 审计待写队列上限，防止 DB 故障时内存无限增长
+        private const int MaxPendingClientHistories = 10000; // 客户端历史待写队列上限，MQTT 事件回调只入队不落库
+        private const int ClientHistoryFlushBatchSize = 200;
+        private const int DashboardSummaryCacheTtlMs = 5000; // Dashboard 汇总缓存时间，避免前端轮询打爆无索引统计查询
         private static readonly TimeSpan AuditFlushCoalesceDelay = TimeSpan.FromMilliseconds(50);
         private static readonly System.Text.UTF8Encoding StrictUtf8Encoding = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
@@ -35,14 +39,18 @@ namespace MqttRelayService.Services.Implementations
         private readonly ILogger<MetricsService> _logger;
         private readonly CancellationTokenSource _auditWriterCts = new();
         private readonly ConcurrentDictionary<string, MessageAuditRecord> _pendingMessageAudits = new();
+        private readonly ConcurrentQueue<ClientConnectionHistoryRecord> _pendingClientHistories = new();
         private readonly SemaphoreSlim _pendingAuditSignal = new(0);
         private static readonly TimeSpan MaxAuditWriteBackoffDelay = TimeSpan.FromSeconds(30);
         private readonly SemaphoreSlim _dashboardBaselineLock = new(1, 1);
+        private readonly SemaphoreSlim _dashboardSummaryLock = new(1, 1);
+        private DashboardSummarySnapshot? _dashboardSummaryCache;
         private readonly Task? _auditWriterTask;
         private int _auditFlushRequested;
         private int _disposed;
         private int _auditWriteFailureCount;
         private int _pendingAuditOverflowLogged; // 审计队列超限告警去重标志，0=未告警，1=已告警
+        private int _clientHistoryOverflowLogged; // 客户端历史队列超限告警去重标志
         private bool _dashboardBaselineInitialized;
         private long _dashboardBaselineReceived;
         private long _dashboardBaselineSucceeded;
@@ -181,6 +189,59 @@ namespace MqttRelayService.Services.Implementations
         }
 
         /// <summary>
+        /// 记录一条因队列满载/入队超时被丢弃的消息，并写入终态审计记录。
+        /// </summary>
+        public void RecordRejectedMessage(ForwardMessage message)
+        {
+            Interlocked.Increment(ref _totalRejected);
+
+            if (message == null)
+            {
+                return;
+            }
+
+            var context = message.RouteContext;
+            const string reason = "队列满载或入队超时，消息已被丢弃";
+
+            CachePayload(message.MessageId, context.Payload);
+
+            AddOrUpdateLog(new MessageLogEntry
+            {
+                MessageId = message.MessageId,
+                Topic = context.Topic,
+                SourceClientId = context.SourceClientId ?? "System",
+                PayloadSize = context.Payload?.Length ?? 0,
+                Qos = context.QoS,
+                Retain = context.Retain,
+                Status = "Rejected",
+                IsSubscriberHit = false,
+                LatencyMs = 0,
+                RetryCount = message.RetryCount,
+                Timestamp = DateTime.Now.ToString("o"),
+                ErrorMessage = reason,
+                SystemTimestamp = DateTime.Now
+            });
+
+            EnqueueMessageAudit(new MessageAuditRecord
+            {
+                MessageId = message.MessageId,
+                Topic = context.Topic,
+                SourceClientId = context.SourceClientId ?? "System",
+                PayloadSize = context.Payload?.Length ?? 0,
+                Payload = GetPayload(message.MessageId),
+                Qos = context.QoS,
+                Retain = context.Retain,
+                Status = "Rejected",
+                IsSubscriberHit = false,
+                LatencyMs = 0,
+                RetryCount = message.RetryCount,
+                CreatedAt = context.Timestamp,
+                UpdatedAt = DateTime.Now,
+                ErrorMessage = reason
+            });
+        }
+
+        /// <summary>
         /// 记录消息转发结果
         /// </summary>
         public void RecordForwarded(MqttRelayService.Models.RouteContext context, bool success, int retryCount, double latencyMs, bool isSubscriberHit = false)
@@ -196,7 +257,9 @@ namespace MqttRelayService.Services.Implementations
 
             if (retryCount > 0)
             {
-                Interlocked.Add(ref _totalRetries, retryCount);
+                // 每次带重试次数的转发尝试只记 1 次重试，
+                // 传入的 retryCount 是累计值，直接累加会让 TotalRetries 与审计表 RetryCount 列对不上。
+                Interlocked.Increment(ref _totalRetries);
             }
 
             CachePayload(context.MessageId, context.Payload);
@@ -253,7 +316,7 @@ namespace MqttRelayService.Services.Implementations
                 }
                 catch
                 {
-                    _payloads[record.MessageId] = "[死信载荷格式非有效 Base64 字符串]";
+                    SetBoundedPayload(record.MessageId, "[死信载荷格式非有效 Base64 字符串]");
                 }
             }
 
@@ -291,6 +354,37 @@ namespace MqttRelayService.Services.Implementations
                 UpdatedAt = DateTime.Now,
                 ErrorMessage = record.FailureReason ?? "达到重试上限"
             });
+        }
+
+        /// <summary>
+        /// 记录一条客户端连接/断开/订阅历史。
+        /// 只做有界入队并唤醒后台 writer，绝不在 MQTT 事件回调线程上访问数据库。
+        /// </summary>
+        public void RecordClientHistory(ClientConnectionHistoryRecord record)
+        {
+            if (_auditRepository == null || record == null || string.IsNullOrEmpty(record.ClientId))
+            {
+                return;
+            }
+
+            if (_pendingClientHistories.Count >= MaxPendingClientHistories)
+            {
+                if (Interlocked.Exchange(ref _clientHistoryOverflowLogged, 1) == 0)
+                {
+                    _logger.LogWarning(
+                        "客户端历史待写队列已达上限 {MaxPendingClientHistories} 条，新的连接/订阅历史将被丢弃",
+                        MaxPendingClientHistories);
+                }
+
+                return;
+            }
+
+            _pendingClientHistories.Enqueue(record);
+
+            if (Interlocked.Exchange(ref _auditFlushRequested, 1) == 0)
+            {
+                SafeReleasePendingAuditSignal();
+            }
         }
 
         private void EnqueueMessageAudit(MessageAuditRecord record)
@@ -423,6 +517,57 @@ namespace MqttRelayService.Services.Implementations
 
             // 队列已排空，重置超限告警标志以便下次 DB 故障时再次触发
             Interlocked.Exchange(ref _pendingAuditOverflowLogged, 0);
+
+            await FlushPendingClientHistoriesAsync();
+        }
+
+        /// <summary>
+        /// 排空客户端历史待写队列。写入失败只记录日志，不回填、不影响 MQTT 事件回调与消息审计主链路。
+        /// </summary>
+        private async Task FlushPendingClientHistoriesAsync()
+        {
+            if (_auditRepository == null)
+            {
+                return;
+            }
+
+            var batch = new List<ClientConnectionHistoryRecord>(ClientHistoryFlushBatchSize);
+
+            while (_pendingClientHistories.TryDequeue(out var record))
+            {
+                batch.Add(record);
+
+                if (batch.Count >= ClientHistoryFlushBatchSize)
+                {
+                    await TryWriteClientHistoryBatchAsync(batch);
+                    batch.Clear();
+                }
+            }
+
+            if (batch.Count > 0)
+            {
+                await TryWriteClientHistoryBatchAsync(batch);
+            }
+
+            Interlocked.Exchange(ref _clientHistoryOverflowLogged, 0);
+        }
+
+        private async Task TryWriteClientHistoryBatchAsync(List<ClientConnectionHistoryRecord> batch)
+        {
+            if (_auditRepository == null || batch.Count == 0)
+            {
+                return;
+            }
+
+            try
+            {
+                await _auditRepository.RecordClientConnectionHistoriesAsync(batch.ToList());
+            }
+            catch (Exception ex)
+            {
+                // 客户端历史属观测数据：失败仅记录日志，不触发退避重试，避免拖慢消息审计的追平速度。
+                _logger.LogError(ex, "批量写入 {Count} 条客户端历史记录失败", batch.Count);
+            }
         }
 
         /// <summary>
@@ -440,16 +585,6 @@ namespace MqttRelayService.Services.Implementations
                 foreach (var record in batch)
                 {
                     RequeueFailedAuditRecord(record);
-                }
-
-                // 失败回填不受 MaxPendingAudits 上限约束，检查待写队列是否超出正常范围
-                var pendingCount = _pendingMessageAudits.Count;
-                if (pendingCount > MaxPendingAudits
-                    && Interlocked.Exchange(ref _pendingAuditOverflowLogged, 1) == 0)
-                {
-                    _logger.LogWarning(
-                        "审计待写队列因持续回填已达 {PendingCount} 条（正常上限 {MaxPendingAudits}），失败回填路径不受上限约束，请关注 DB 可用性",
-                        pendingCount, MaxPendingAudits);
                 }
 
                 throw;
@@ -516,12 +651,26 @@ namespace MqttRelayService.Services.Implementations
 
         /// <summary>
         /// 将写入失败的审计记录回填到待写队列。
-        /// 与正常入队不同：失败回填不受 MaxPendingAudits 上限约束，防止 DB 故障期间最终态被新消息挤掉。
+        /// 回填同样受 MaxPendingAudits 上限约束：审计库长期不可用时，无界回填会把进程拖到内存耗尽；
+        /// 达到上限后丢弃本次回填记录并记录一次错误日志。
         /// </summary>
         private void RequeueFailedAuditRecord(MessageAuditRecord record)
         {
             if (_auditRepository == null || string.IsNullOrEmpty(record.MessageId))
             {
+                return;
+            }
+
+            if (!_pendingMessageAudits.ContainsKey(record.MessageId)
+                && _pendingMessageAudits.Count >= MaxPendingAudits)
+            {
+                if (Interlocked.Exchange(ref _pendingAuditOverflowLogged, 1) == 0)
+                {
+                    _logger.LogError(
+                        "审计待写队列已达上限 {MaxPendingAudits} 条，写入失败的审计记录将被丢弃，请立即检查审计数据库可用性",
+                        MaxPendingAudits);
+                }
+
                 return;
             }
 
@@ -555,23 +704,48 @@ namespace MqttRelayService.Services.Implementations
         private void CachePayload(string messageId, byte[]? payload)
         {
             if (string.IsNullOrEmpty(messageId)) return;
+
+            // 所有写入路径（含空载荷与死信回填）都必须经过同一个有界写入方法：
+            // 早期实现只在非空载荷分支登记驱逐键，导致空载荷条目永久驻留形成无界内存增长。
             if (payload == null || payload.Length == 0)
             {
-                _payloads[messageId] = "[空载荷]";
+                SetBoundedPayload(messageId, "[空载荷]");
                 return;
             }
 
-            _payloads[messageId] = FormatPayloadForDisplay(payload);
+            SetBoundedPayload(messageId, FormatPayloadForDisplay(payload));
+        }
+
+        /// <summary>
+        /// 有界写入载荷缓存：写入内容的同时登记驱逐键，超过上限即淘汰最旧条目。
+        /// </summary>
+        private void SetBoundedPayload(string messageId, string payloadText)
+        {
+            _payloads[messageId] = payloadText;
             _payloadKeys.Enqueue(messageId);
 
-            while (_payloadKeys.Count > MaxLogCount)
+            while (_payloadKeys.Count > MaxPayloadCount)
             {
                 if (_payloadKeys.TryDequeue(out var oldKey))
                 {
                     _payloads.TryRemove(oldKey, out _);
                 }
+                else
+                {
+                    break;
+                }
             }
         }
+
+        /// <summary>
+        /// 测试与诊断用：当前载荷缓存条目数，用于断言缓存始终有界。
+        /// </summary>
+        internal int CachedPayloadCount => _payloads.Count;
+
+        /// <summary>
+        /// 测试与诊断用：当前内存消息日志条目数，用于断言滑动窗口始终有界。
+        /// </summary>
+        internal int MessageLogCount => _messageLogs.Count;
 
         private static string FormatPayloadForDisplay(byte[] payload)
         {
@@ -701,7 +875,7 @@ namespace MqttRelayService.Services.Implementations
 
         private static MessageAuditRecord MergeAuditRecord(MessageAuditRecord existing, MessageAuditRecord incoming)
         {
-            if (ShouldKeepExistingAuditState(existing.Status, incoming.Status))
+            if (ShouldKeepExistingAuditState(existing, incoming))
             {
                 existing.UpdatedAt = incoming.UpdatedAt;
                 existing.Topic = incoming.Topic;
@@ -732,15 +906,26 @@ namespace MqttRelayService.Services.Implementations
             return existing;
         }
 
-        private static bool ShouldKeepExistingAuditState(string existingStatus, string incomingStatus)
+        private static bool ShouldKeepExistingAuditState(MessageAuditRecord existing, MessageAuditRecord incoming)
         {
-            return GetStatusPriority(existingStatus) > GetStatusPriority(incomingStatus);
+            var existingPriority = GetStatusPriority(existing.Status);
+            var incomingPriority = GetStatusPriority(incoming.Status);
+
+            if (existingPriority != incomingPriority)
+            {
+                return existingPriority > incomingPriority;
+            }
+
+            // 同优先级状态（如 Failed 与 Succeeded 都是 4）必须按更新时间取新，
+            // 否则失败批次回填时可能用较旧的 Failed 覆盖较新的终态。
+            return existing.UpdatedAt > incoming.UpdatedAt;
         }
 
         private static int GetStatusPriority(string status)
         {
             return status switch
             {
+                "Rejected" => 5,
                 "DeadLetter" => 5,
                 "Failed" => 4,
                 "Succeeded" => 4,
@@ -863,7 +1048,7 @@ namespace MqttRelayService.Services.Implementations
 
             if (_auditRepository != null)
             {
-                var summary = await _auditRepository.GetDashboardMessageSummaryAsync(MaxLogCount);
+                var summary = await GetCachedDashboardSummaryAsync(MaxLogCount);
                 totalReceived = Math.Max(0, summary.TotalMessages);
                 totalSucceeded = Math.Max(0, summary.TotalSucceeded);
                 totalFailed = Math.Max(0, summary.TotalFailed);
@@ -949,6 +1134,65 @@ namespace MqttRelayService.Services.Implementations
                 return BuildDegradedDashboard();
             }
         }
+
+        /// <summary>
+        /// 读取带缓存的 Dashboard 汇总数据。
+        /// 前端按秒轮询，而汇总需要在审计表上做多次不带索引的聚合统计，
+        /// 因此这里做短周期缓存，避免把数据库打成扫描风暴。
+        /// </summary>
+        private async Task<DashboardSummarySnapshot> GetCachedDashboardSummaryAsync(int recentCount)
+        {
+            var cached = _dashboardSummaryCache;
+            if (IsDashboardSummaryCacheValid(cached))
+            {
+                return cached!;
+            }
+
+            await _dashboardSummaryLock.WaitAsync();
+            try
+            {
+                cached = _dashboardSummaryCache;
+                if (IsDashboardSummaryCacheValid(cached))
+                {
+                    return cached!;
+                }
+
+                var summary = await _auditRepository!.GetDashboardMessageSummaryAsync(recentCount);
+                var snapshot = new DashboardSummarySnapshot(
+                    summary.TotalMessages,
+                    summary.TotalPending,
+                    summary.TotalSucceeded,
+                    summary.TotalFailed,
+                    summary.TotalDeadLetter,
+                    summary.RecentItems,
+                    DateTime.UtcNow);
+
+                _dashboardSummaryCache = snapshot;
+                return snapshot;
+            }
+            finally
+            {
+                _dashboardSummaryLock.Release();
+            }
+        }
+
+        private static bool IsDashboardSummaryCacheValid(DashboardSummarySnapshot? cached)
+        {
+            return cached != null
+                && (DateTime.UtcNow - cached.CachedAt).TotalMilliseconds < DashboardSummaryCacheTtlMs;
+        }
+
+        /// <summary>
+        /// Dashboard 汇总快照的短周期缓存载体。
+        /// </summary>
+        private sealed record DashboardSummarySnapshot(
+            int TotalMessages,
+            int TotalPending,
+            int TotalSucceeded,
+            int TotalFailed,
+            int TotalDeadLetter,
+            IReadOnlyList<MessageAuditRecord> RecentItems,
+            DateTime CachedAt);
 
         /// <summary>
         /// 当完整 Dashboard 快照生成失败时返回的最小降级结构，确保前端不会拿到 500 或空响应。
@@ -1048,6 +1292,7 @@ namespace MqttRelayService.Services.Implementations
             finally
             {
                 _pendingAuditSignal.Dispose();
+                _dashboardSummaryLock.Dispose();
                 _auditWriterCts.Dispose();
             }
         }

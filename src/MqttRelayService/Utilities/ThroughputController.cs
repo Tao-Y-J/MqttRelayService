@@ -1,11 +1,11 @@
-using System;
+﻿using System;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace MqttRelayService.Utilities
 {
     /// <summary>
-    /// 吞吐量与并发控制器，支持动态暂停、单线程速率限制和并发度调节。
+    /// 吞吐量与并发控制器，支持单线程速率限制与动态并发度调节。
     /// </summary>
     public class ThroughputController
     {
@@ -13,12 +13,10 @@ namespace MqttRelayService.Utilities
         private readonly object _rateLock = new();
         private readonly int _maxConcurrencyHardLimit;
 
-        private bool _isPaused;
         private int _maxMessagesPerSecond = 0;
         private int _maxConcurrency = 50;
         private int _activeCount = 0;
 
-        private TaskCompletionSource _pauseTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private TaskCompletionSource _concurrencyTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         private double _tokens = 0;
@@ -39,22 +37,7 @@ namespace MqttRelayService.Utilities
         public ThroughputController(int maxConcurrencyHardLimit)
         {
             _maxConcurrencyHardLimit = Math.Max(1, maxConcurrencyHardLimit);
-            _pauseTcs.TrySetResult();
             _concurrencyTcs.TrySetResult();
-        }
-
-        /// <summary>
-        /// 是否处于暂停状态。
-        /// </summary>
-        public bool IsPaused
-        {
-            get
-            {
-                lock (_lock)
-                {
-                    return _isPaused;
-                }
-            }
         }
 
         /// <summary>
@@ -109,36 +92,6 @@ namespace MqttRelayService.Utilities
                 lock (_lock)
                 {
                     return _activeCount;
-                }
-            }
-        }
-
-        /// <summary>
-        /// 一键暂停转发服务。
-        /// </summary>
-        public void Pause()
-        {
-            lock (_lock)
-            {
-                if (!_isPaused)
-                {
-                    _isPaused = true;
-                    _pauseTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                }
-            }
-        }
-
-        /// <summary>
-        /// 恢复转发服务。
-        /// </summary>
-        public void Resume()
-        {
-            lock (_lock)
-            {
-                if (_isPaused)
-                {
-                    _isPaused = false;
-                    _pauseTcs.TrySetResult();
                 }
             }
         }
@@ -204,30 +157,47 @@ namespace MqttRelayService.Utilities
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                Task? pauseTask = null;
                 Task? concurrencyTask = null;
+                var slotAcquired = false;
 
                 lock (_lock)
                 {
-                    if (_isPaused)
-                    {
-                        pauseTask = _pauseTcs.Task;
-                    }
-                    else if (_activeCount >= _maxConcurrency)
+                    if (_activeCount >= _maxConcurrency)
                     {
                         concurrencyTask = _concurrencyTcs.Task;
                     }
                     else
                     {
                         _activeCount++;
-                        break;
+                        slotAcquired = true;
                     }
                 }
 
-                if (pauseTask != null)
+                if (slotAcquired)
                 {
-                    await pauseTask;
-                    continue;
+                    // 限速等待发生在并发槽位已占用之后；一旦它因取消而抛出，
+                    // 必须回滚刚占用的槽位，否则单例控制器会永久泄漏槽位并逐步堵死整条投递链路。
+                    try
+                    {
+                        await ApplyRateLimitingAsync(cancellationToken);
+                        return;
+                    }
+                    catch
+                    {
+                        lock (_lock)
+                        {
+                            if (_activeCount > 0)
+                            {
+                                _activeCount--;
+                            }
+
+                            var rollbackTcs = _concurrencyTcs;
+                            _concurrencyTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                            rollbackTcs.TrySetResult();
+                        }
+
+                        throw;
+                    }
                 }
 
                 if (concurrencyTask != null)
@@ -236,8 +206,6 @@ namespace MqttRelayService.Utilities
                     continue;
                 }
             }
-
-            await ApplyRateLimitingAsync(cancellationToken);
         }
 
         /// <summary>

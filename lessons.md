@@ -1,4 +1,4 @@
-# 长期经验记录
+﻿# 长期经验记录
 
 本文档记录跨任务的长期经验、踩坑记录和设计决策，供后续会话参考。
 
@@ -112,11 +112,16 @@ powershell -ExecutionPolicy Bypass -NoProfile -Command "& '%~dp0install-service.
 - 消费循环改用 `await foreach`，空队列时真正异步挂起
 - 取消 token 触发后，消费者正确退出，无需额外轮询判断
 
-### 6.3 重试退避必须阻塞消费者或引入延迟队列
+### 6.3 重试退避必须区分运行期与停机期两种调度
 
 **现象**：`HandleFailureAsync` 设置 `NextRetryAt` 后立即重新入队，消费循环不检查时间戳，重试消息被瞬间再次消费。
 
-**解决**：在 `HandleFailureAsync` 中计算退避延迟后 `await Task.Delay(delay)` 再重新入队。多消费者场景下，单个消费者的延迟阻塞不影响其他消费者。未实现独立延迟队列。
+**解决**：当前实现按运行期与停机期分别处理，不再让运行期消费者阻塞在退避上：
+
+- 运行期：`ScheduleRetryEnqueueAsync` 把退避等待和重新入队放进后台任务，消费者立即返回处理下一条消息；后台调度任务数量受 `ReliabilityOptions.MaxPendingRetryTasks` 限制（见 6.11）。
+- 停机排空阶段：`DelayAndRequeueDuringStopAsync` 同步等待该次退避结束后再尝试重新入队，保证 drain 不会在消息重新出现之前提前宣布排空完成（见 6.9）。
+
+早期实现在 `HandleFailureAsync` 中直接 `await Task.Delay(delay)` 再入队，退避期间消费者无法处理其他消息，与 6.11 的“运行期非阻塞后台重试调度”自相矛盾，已按上述分支改写。未实现独立延迟队列。
 
 ### 6.4 EchoToSender 必须在 Broker 分发层拦截
 
@@ -178,7 +183,30 @@ MQTT 客户端在网络抖动或自动重连时可能使用相同 ClientId 建�
 
 - 解决：MqttBrokerHost 在连接事件中生成 ConnectionId 并写入 MQTTnet SessionItems，断开事件带回该值；ClientRegistry.UnregisterAsync 只移除与当前 ConnectionId 匹配的会话，过期断开事件只记录 Warning 并忽略。
 
-## 8. 现代 Web 零侵入 Dashboard 独立部署与代理经验
+### 6.13 停机必须最后才停 Broker
+
+停机阶段如果先停止 Broker，排空阶段就无法再向订阅者注入消息，队列里剩余的消息只能进入死信或丢失。正确顺序是：
+
+1. `IMqttBrokerHost.StopAcceptingClientPublishes()` 封堵客户端新发布入口，Broker 保持运行。
+2. 取消消费者（停止 `ReadAllAsync`），等在途消息回队。
+3. 在 `ShutdownDrainTimeoutMs` 内多轮排空队列，此时 Broker 仍在运行，注入仍能送达订阅者。
+4. 排空结束后才由 `BrokerWorker` 停止 Broker。
+
+HostedService 注册顺序必须与停机顺序匹配：Host 按注册逆序停止，因此 `QueueMetricsWorker` 最先注册（最后停止）、`BrokerWorker` 其次、`DeliveryWorker` 最后注册（最先停止并执行排空）。
+
+### 6.14 工厂委托注册的装饰器会隐藏循环依赖，并表现为“启动卡死且无任何报错”
+
+**现象**：以默认配置（`Web:Enabled=true`）启动时，进程打印到「审计持久化初始化成功」「消息队列已初始化」后永久停住：既不绑定 1883/5000，也不抛异常，CPU 不增长。仓库内 `bin/Debug/net8.0/win-x64/Logs/relay-2026061821.log`（2026-06-18 两次启动）就是这样截断的。
+
+**根因**：`Program.ConfigureCoreServices` 中装饰器使用工厂委托注册（`AddSingleton<IMessageQueue>(sp => new MetricsMessageQueue(..., sp.GetRequiredService<IMetricsService>()))`），容器无法静态识别其依赖，因此循环依赖不会被报成 `A circular dependency was detected`。当时的环是：`MetricsService` → `IMessageQueue`/`IClientRegistry` → `MetricsMessageQueue`/`MetricsClientRegistry` → `IMetricsService`。
+
+**结论**：
+- 任何装饰器与它装饰的依赖之间都不允许在构造期互相解析；装饰器需要指标服务时使用 `Utilities/LazyService<T>`，只在业务调用时读取 `Value`。
+- `LazyService<T>` 只能有一个可从容器解析的公开构造函数，否则容器会因构造函数歧义抛 `Unable to activate type`；测试用固定实例走静态 `From(T)`。
+- 静态 Review 无法发现这类缺陷。任何改动 DI 注册的提交都必须跑 `ServiceRegistrationTests`（按生产注册顺序解析全部关键单例）与 `HostLifecycleTests`（真实 `IHost` 启动 + 真实 MQTT 转发 + 优雅停机）。
+- 排查这类“启动无异常卡死”时，先在真实进程上启动一次并观察日志停在哪一步，比继续读代码更快定位。
+
+## 8. 现代 Web 零侵入 Dashboard 与指标拦截经验
 
 对于高可用且对稳定性要求极高（如 Windows Service）的后台服务，构建可视化监控 Dashboard 时必须兼顾“零侵入”与“零故障风险”。
 
@@ -194,56 +222,51 @@ MQTT 客户端在网络抖动或自动重连时可能使用相同 ClientId 建�
   ```
 - **优势**：原始服务完全不知道自己被监控，业务逻辑 100% 保持纯净，核心单元测试无需做任何逻辑修改。
 
-### 8.2 独立进程部署与代理设计规避 CORS 限制
+### 8.2 单端口统一 Kestrel 同时提供 Dashboard 与 API
 
-- **背景**：直接将大屏网页集成在主服务中，会增大主服务发布、热重载以及静态网页修改时的相互牵连，甚至容易因为浏览器 CORS 跨域安全限制导致大屏访问受阻。
-- **方案**：
-  1. 主服务（5000端口）仅提供轻量 JSON 指标 API。
-  2. Dashboard 作为一个独立的 Web 应用（5001端口），只托管静态 `wwwroot`。
-  3. Dashboard 后台挂载 Minimal API 代理：当浏览器请求 5001 端口的 `/api/metrics` 时，其后台通过 `IHttpClientFactory` 透明代理至 5000 端口并回传。
-- **优势**：完美避开了浏览器的 CORS 跨域问题，主服务不需要配置任何跨域头，保障了内网环境的极简和纯粹安全；大屏前端页面修改发布无需重启主服务。
+- **实际实现**：`Web:Enabled=true` 时 `Program` 走 `WebApplication.CreateBuilder`，`builder.WebHost.ConfigureKestrel` 只调用一次 `kestrel.ListenAnyIP(webOptions.Port)`；Dashboard 静态页由 `MapDashboard` 映射 `/` 与 `/index.html` 并从 `wwwroot` 读取 `index.html` 返回，`/api/*` 端点映射在同一个 `WebApplication` 上。Dashboard 与 API 因此同源，不需要任何 CORS 配置，也不需要独立进程或代理。
+- **鉴权**：`/api` 组上一个端点过滤器校验请求头 `X-Api-Key`；`Web:ApiKey` 为空时直接放行。页面不内嵌密钥，运维在弹窗录入后只保存到浏览器 `sessionStorage`。`/api/health` 注册在 `/api` 组之外，始终匿名可访问。
+- **边界**：不存在 5001 端口、独立 Dashboard 可执行文件或 `IHttpClientFactory` 代理链路。
 
-### 8.3 线程安全与滑动容量限制防范内存泄漏
+### 8.3 有界写入是载荷缓存的唯一写入路径
 
-- **背景**：实时大屏审计经常需要追溯最新的消息 Payload。
-- **原则**：绝对不能允许内存缓冲区无界增长，必须对任何收集到的指标、日志以及 Payload 做物理容量截断。
-- **方案**：
-  1. 采样曲线数据：使用环形缓冲区或限制 `ConcurrentQueue` 的容量上限（如 60 条采样记录，最近 2 分钟历史）。
-  2. 审计日志：只记录最近 100 条简要快照。
-  3. Payload 缓存：使用并发字典（`ConcurrentDictionary`）实现滑动内存缓存，上限 100 条，单条超 8KB 截断。确保大屏既能审计真实明细，又决不会造成哪怕 1 字节的内存溢出。
+- **背景**：实时大屏审计需要追溯最新的消息 Payload。
+- **原则**：不允许内存缓冲区无界增长，任何收集到的采样、日志与 Payload 都必须做物理容量截断。
+- **实际实现**：
+  1. 采样曲线：`_historySnapshots` 上限 60 条（每 2 秒一个采样点，覆盖最近 2 分钟）。
+  2. 审计日志：`_messageLogs` 按 `MessageId` 就地覆盖最终态，上限 100 条，超出即按 `_messageLogKeys` 顺序驱逐最旧条目。
+  3. Payload 缓存：`SetBoundedPayload` 是唯一写入路径，写入 `ConcurrentDictionary` 的同时把 `MessageId` 登记到 `_payloadKeys`，超过 `MaxPayloadCount`（100 条）即淘汰最旧条目；单条载荷超过 8192 字节只保留前 8KB 预览（UTF-8 预览不可用时退化为 HEX 预览）。
+- **踩坑**：历史实现只在非空载荷分支登记驱逐键，空载荷条目永久驻留并形成无界内存增长。现在 `CachePayload` 对空载荷、长载荷和死信回填都统一调用 `SetBoundedPayload`，空载荷固定写入 `[空载荷]` 占位并同样参与淘汰，因此载荷缓存的条目数始终不超过 100 条。
 
 ### 8.4 高吞吐审计写库使用最终态快照
 
 - **原则**：Dashboard 和审计库只需要每条消息的当前最新态/最终态时，不写状态事件流水。
-- **实践**：`MetricsService` 在后台刷盘前按 `MessageId` 合并 Queued 与终态，快速完成的消息只落一次最终快照；`AuditRepository` 继续使用 SqlSugar ORM 批量 Upsert，避免为当前 SQLite 临时方案写专用 SQL，保留后续服务器数据库迁移兼容性。
+- **实践**：`MetricsService` 在后台刷盘前按 `MessageId` 合并 Queued 与终态，快速完成的消息只落一次最终快照；`AuditRepository` 用 SqlSugar ORM 批量 Upsert，不写某个数据库方言专用 SQL，因此 `AuditStorage:Provider` 换成其它 `DbType` 时同一套写入路径仍然可用。
 - **边界**：此策略不改变 MQTT 转发、重试、死信主链路；审计持久化仍是后台异步能力，写库失败只影响审计追平，不阻塞实时转发。
 
-## 9. 本地开发一键启停脚本与 Windows 进程树强杀经验
+## 9. 仓库脚本事实与 Windows cmd 编码踩坑
 
-对于包含多个解耦子系统的微服务/后台应用，在本地 Windows 开发环境下，提供一键启停脚本能极大提升开发效率。但在实现时必须防范子进程残留与中文乱码两大缺陷。
+仓库当前只有以下脚本，不存在一键启停脚本，也不存在独立的 Dashboard 可执行文件：
 
-### 9.1 利用内存 Byte 数组写入纯净无 BOM 的 GBK 批处理脚本
+- `run-stress-60s.cmd`（仓库根目录）：纯 ASCII，调用同目录的 `stress_mqtt_1883.py`，对 `127.0.0.1:1883` 压测 60 秒。
+- `stress_mqtt_1883.py`（仓库根目录）：Python 压测工具，由 `run-stress-60s.cmd` 调用。
+- `src/MqttRelayService/Scripts/install-service.cmd` 与 `install-service.ps1`：Windows Service 安装，随发布输出一起复制到发布目录。
+- `src/MqttRelayService/Scripts/uninstall-service.cmd` 与 `uninstall-service.ps1`：Windows Service 卸载。
+
+历史上存在过的 `start-dev.cmd`、`stop-dev.cmd` 与 `MqttRelayService.Dashboard.exe` 均已删除，针对这些文件的脚本维护经验不再适用。当前只有单进程 `MqttRelayService.exe`（Web 管理面开启时它就是承载 MQTT + Kestrel 的唯一进程）。
+
+### 9.1 用内存字节流写入无 BOM 的 GBK 批处理脚本
 
 - **问题**：在 Windows `cmd.exe` 下执行 `.cmd` 文件时，如果文件头部包含 UTF-8 BOM 字节（`EF BB BF`），系统会把 BOM 强行解析为非 ASCII 字符，导致首行 `@echo off` 被解析为非法命令并产生严重乱码。
-- **方案**：使用 PowerShell 写入脚本时，严禁使用会隐式添加 BOM 的常规输出重定向命令，而是通过指定字符集直接导出内存二进制字节流：
+- **做法**：使用 PowerShell 写入脚本时，不使用会隐式添加 BOM 的常规输出重定向命令，而是通过指定字符集直接导出内存二进制字节流：
   ```powershell
   $content = "..."
   $bytes = [System.Text.Encoding]::GetEncoding(936).GetBytes($content)
-  [System.IO.File]::WriteAllBytes("start-dev.cmd", $bytes)
+  [System.IO.File]::WriteAllBytes("x.cmd", $bytes)
   ```
-- **效果**：首字节严格为 `@`（十进制 64），保证 cmd 原生解析 100% 兼容，彻底杜绝乱码和命令解析错误。
+- **效果**：首字节严格为 `@`（十进制 64），cmd 原生解析兼容。仓库根目录的 `run-stress-60s.cmd` 就是这种无 BOM 状态（前三字节为 64、101、99，即 `@ec`）。
 
-### 9.2 强力清除进程树以防范端口占用与控制台挂起
+### 9.2 批处理脚本文本保持纯 ASCII
 
-- **背景**：通过 `dotnet run` 启动项目时，底层会先拉起 `dotnet.exe`（父进程），然后再拉起最终的 `MqttRelayService.exe` 与 `MqttRelayService.Dashboard.exe`（实际运行子进程）。
-- **缺陷**：如果直接 `taskkill /im dotnet.exe`，会误杀系统上其他无关的 .NET 运行进程；而如果仅强杀 `dotnet.exe` 进程本身，底层的子进程会因为变成孤儿进程而悬挂残留，并继续强占端口（如 1883、5000、5001），直接导致下一次启动因为端口冲突而失败。
-- **方案**：
-  1. 精准杀灭子可执行程序：使用 `taskkill /f /t /im MqttRelayService.exe` 和 `taskkill /f /t /im MqttRelayService.Dashboard.exe`。通过 `/t` 强行杀死指定映像的整棵进程树。
-  2. 回收 dotnet 宿主：子进程树销毁后，`dotnet.exe` 宿主检测到执行体退出，会自我销毁，从而优雅地彻底释放端口。
-  3. 清理残留窗口：配合 `taskkill /f /fi "WINDOWTITLE eq MqttRelayService*"`，强制关闭所有窗口标题匹配 `MqttRelayService*` 的独立 CMD 控制台，实现干净的桌面自愈清理。
-
-### 9.3 跨语系/跨默认代码页环境下的纯 ASCII 脚本方案
-
-- **问题**：在跨国团队或多样化开发环境下，不同 Windows 操作系统的默认 ANSI 代码页不同（如纯英文版系统默认代码页为 `437`，或者用户系统开启了“Beta: 全局 Unicode UTF-8 语言支持”使得 CMD 默认以 UTF-8 解码）。在此类环境下，即使使用了 GBK (936) 编码写入脚本并调用 `chcp 936`，CMD 也极易因为底层代码页不支持或强行解码为 UTF-8 而产生字节切分和命令解析错乱（例如 Chinese 字符的高位字节被误判为 `&`、`|`、`>` 等管道/重定向符，进而强行将中文字符当作命令执行，引发 `'清理完毕。' 不是内部或外部命令` 等系列报错）。
-- **方案**：采用 **纯 ASCII（0-127）** 编写启动与关闭脚本的所有打印文本、提示、控制符与注释。标准 ASCII 字符在 UTF-8、GBK、Shift-JIS、Latin-1、OEM 437 等世界上所有代码页和编码中均是 100% 完全等价且一致的。
-- **效果**：不仅完美保留了开发期自愈和强杀进程树的核心功能，更彻底消除了任何 Windows 版本、任何系统语系、任何控制台默认代码页设置下的乱码与字节拆分报错风险。
+- **问题**：不同 Windows 环境的默认 ANSI 代码页不同（纯英文版系统默认 `437`；启用“Beta: 全局 Unicode UTF-8 语言支持”后 CMD 默认按 UTF-8 解码）。在这类环境下，即使脚本按 GBK (936) 写入并调用 `chcp 936`，CMD 仍可能按错误代码页解码，把中文字符的高位字节误判为 `&`、`|`、`>` 等管道/重定向符，并把中文当作命令执行。
+- **做法**：批处理脚本的打印文本、提示、控制符与注释全部使用 **纯 ASCII（0-127）**。ASCII 字符在 UTF-8、GBK、Shift-JIS、Latin-1、OEM 437 等代码页下字节完全一致。根目录的 `run-stress-60s.cmd` 所有输出文本都是纯 ASCII。

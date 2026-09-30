@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
@@ -14,14 +14,19 @@ namespace MqttRelayService.Services.Implementations.Decorators
     {
         private readonly IMqttBrokerHost _inner;
         private readonly IMetricsService _metrics;
+        private readonly ILogger<MetricsMqttBrokerHost>? _logger;
 
         /// <summary>
         /// 构造 MQTT 宿主指标拦截装饰器。
         /// </summary>
-        public MetricsMqttBrokerHost(IMqttBrokerHost inner, IMetricsService metrics)
+        /// <param name="inner">被装饰的 Broker 宿主</param>
+        /// <param name="metrics">指标服务</param>
+        /// <param name="logger">可选的日志记录器，仅用于记录指标本身的记录失败</param>
+        public MetricsMqttBrokerHost(IMqttBrokerHost inner, IMetricsService metrics, ILogger<MetricsMqttBrokerHost>? logger = null)
         {
             _inner = inner;
             _metrics = metrics;
+            _logger = logger;
         }
 
         public bool IsRunning => _inner.IsRunning;
@@ -34,6 +39,14 @@ namespace MqttRelayService.Services.Implementations.Decorators
         public Task StopAsync(CancellationToken cancellationToken = default)
         {
             return _inner.StopAsync(cancellationToken);
+        }
+
+        /// <summary>
+        /// 封堵客户端新发布入口，直接透传给被装饰的 Broker 宿主。
+        /// </summary>
+        public void StopAcceptingClientPublishes()
+        {
+            _inner.StopAcceptingClientPublishes();
         }
 
         public async Task<bool> PublishAsync(
@@ -74,7 +87,15 @@ namespace MqttRelayService.Services.Implementations.Decorators
                         Timestamp = firstReceivedAt ?? DateTime.UtcNow.ToLocalTime()
                     };
 
-                    _metrics.RecordForwarded(context, success, retryCount, stopwatch.Elapsed.TotalMilliseconds, isSubscriberHit);
+                    // 指标记录只做观测，绝不能改变被装饰对象的投递结果。
+                    try
+                    {
+                        _metrics.RecordForwarded(context, success, retryCount, stopwatch.Elapsed.TotalMilliseconds, isSubscriberHit);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.LogError(ex, "记录直接注入消息 {MessageId} 的转发指标失败", context.MessageId);
+                    }
                 }
             }
         }

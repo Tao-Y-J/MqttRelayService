@@ -1,4 +1,4 @@
-namespace MqttRelayService.Models
+﻿namespace MqttRelayService.Models
 {
     /// <summary>
     /// 内部转发消息
@@ -39,5 +39,11 @@ namespace MqttRelayService.Models
         /// 下次重试时间
         /// </summary>
         public DateTime? NextRetryAt { get; set; }
+
+        /// <summary>
+        /// 最近一次路由命中的目标摘要（命中客户端列表或“无命中订阅者”）。
+        /// 作为“目标规则”记录进死信，便于故障诊断。
+        /// </summary>
+        public string? RouteTargetSummary { get; set; }
     }
 }

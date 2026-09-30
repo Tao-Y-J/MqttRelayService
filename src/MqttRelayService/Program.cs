@@ -1,7 +1,7 @@
 ﻿using System;
+using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
@@ -23,6 +23,16 @@ namespace MqttRelayService
     /// </summary>
     public class Program
     {
+        /// <summary>
+        /// Web API 单页最大条数上限，防止超大 pageSize 一次性物化整张审计表。
+        /// </summary>
+        private const int MaxApiPageSize = 200;
+
+        /// <summary>
+        /// Web API 最大页码，与 MaxApiPageSize 配合保证 Skip 偏移量不溢出。
+        /// </summary>
+        private const int MaxApiPageNumber = 1000000;
+
         public static async Task Main(string[] args)
         {
             try
@@ -82,13 +92,34 @@ namespace MqttRelayService
 
             using (var scope = app.Services.CreateScope())
             {
-                var auditRepository = scope.ServiceProvider.GetRequiredService<IAuditRepository>();
-                await auditRepository.InitializeAsync();
-
-                if (scope.ServiceProvider.GetRequiredService<IMetricsService>() is MetricsService metricsService)
+                // 审计持久化属于 Web 管理面的可选能力：初始化失败时必须降级为"审计不可用"，
+                // 不能因为审计库路径、Provider 或权限问题把整个 MQTT 转发主链路一起拖停。
+                try
                 {
-                    await metricsService.InitializeDashboardCountersFromAuditAsync();
+                    var auditRepository = scope.ServiceProvider.GetRequiredService<IAuditRepository>();
+                    await auditRepository.InitializeAsync();
+
+                    if (scope.ServiceProvider.GetRequiredService<IMetricsService>() is MetricsService metricsService)
+                    {
+                        await metricsService.InitializeDashboardCountersFromAuditAsync();
+                    }
                 }
+                catch (Exception ex)
+                {
+                    Log.ForContext<Program>().Error(ex,
+                        "审计持久化初始化失败，Web 管理面将以“审计不可用”状态继续提供实时指标");
+                }
+            }
+
+            Log.ForContext<Program>().Information(
+                "Web 管理面已启用：监听端口 {Port}，API 认证 {AuthState}",
+                webOptions.Port,
+                string.IsNullOrWhiteSpace(webOptions.ApiKey) ? "未配置（所有 /api 端点无需鉴权）" : "已通过 X-Api-Key 启用");
+
+            if (string.IsNullOrWhiteSpace(webOptions.ApiKey))
+            {
+                Log.ForContext<Program>().Warning(
+                    "Web 管理面未配置 Web:ApiKey，所有 /api 端点（含审计与载荷查询、客户端清单、吞吐调控）都不做鉴权，安全边界完全依赖网络隔离");
             }
 
             MapWebEndpoints(app);
@@ -118,8 +149,14 @@ namespace MqttRelayService
             bool enableWeb)
         {
             var logger = SerilogLogging.CreateLogger(configuration, serviceOptions.Name);
+            // 必须同时赋值 Serilog 静态门面：Main 的 Log.Fatal / Log.CloseAndFlush 走的是静态 Log.Logger，
+            // 只调用 AddSerilog(ILogger) 不会设置它，启动致命错误与退出 flush 都会变成静默空操作。
+            Log.Logger = logger;
+
             logging.ClearProviders();
             logging.AddSerilog(logger);
+
+            ValidateAuthConfiguration(configuration, logger);
 
             services.AddWindowsService(options =>
             {
@@ -137,13 +174,65 @@ namespace MqttRelayService
             RegisterHostedServices(services);
         }
 
-        private static void ConfigureCoreServices(IServiceCollection services, IConfiguration configuration, bool enableWeb)
+        /// <summary>
+        /// 启动时校验认证配置的一致性并给出明确告警。
+        /// 匿名认证开启时 Auth:Users 与 ClientIdPrefix 全部不生效；非匿名但没有任何账号时等于无人可连，必须启动失败。
+        /// </summary>
+        internal static void ValidateAuthConfiguration(IConfiguration configuration, Serilog.ILogger logger)
+        {
+            var authOptions = configuration.GetSection("Auth").Get<AuthOptions>() ?? new AuthOptions();
+
+            if (authOptions.AllowAnonymous)
+            {
+                if (authOptions.Users.Count > 0)
+                {
+                    logger.Warning(
+                        "认证配置告警：Auth:AllowAnonymous=true 时 Auth:Users（{UserCount} 个账号）与 ClientIdPrefix 全部不生效，Broker 接受任何客户端的匿名连接，错口令也不会被拒绝",
+                        authOptions.Users.Count);
+                }
+                else
+                {
+                    logger.Warning("认证配置告警：Auth:AllowAnonymous=true，Broker 接受任何客户端的匿名连接");
+                }
+
+                return;
+            }
+
+            if (authOptions.Users.Count == 0)
+            {
+                throw new InvalidOperationException("Auth:AllowAnonymous=false 时必须配置至少一个 Auth:Users 账号，否则任何客户端都无法连接");
+            }
+        }
+
+        internal static void ConfigureCoreServices(IServiceCollection services, IConfiguration configuration, bool enableWeb)
         {
             services.Configure<ServiceOptions>(configuration.GetSection("Service"));
-            services.Configure<MqttOptions>(configuration.GetSection("Mqtt"));
+
+            services.AddOptions<MqttOptions>()
+                .Bind(configuration.GetSection("Mqtt"))
+                .Validate(o => o.TcpPort is >= 1 and <= 65535, "Mqtt:TcpPort 必须在 1-65535 之间")
+                .ValidateOnStart();
+
             services.Configure<AuthOptions>(configuration.GetSection("Auth"));
             services.Configure<RoutingOptions>(configuration.GetSection("Routing"));
-            services.Configure<ReliabilityOptions>(configuration.GetSection("Reliability"));
+
+            // 可靠性配置集中校验：这些值直接决定队列上限、超时与重试语义，
+            // 误配（例如 QueueCapacity=0 或 RetryBaseDelayMs=0）必须在启动时就失败，而不是运行期隐式退化。
+            services.AddOptions<ReliabilityOptions>()
+                .Bind(configuration.GetSection("Reliability"))
+                .Validate(o => o.QueueCapacity >= 1, "Reliability:QueueCapacity 必须大于等于 1")
+                .Validate(o => o.MaxConcurrentHandlers >= 0, "Reliability:MaxConcurrentHandlers 不能为负数")
+                .Validate(o => o.MaxPendingRetryTasks >= 0, "Reliability:MaxPendingRetryTasks 不能为负数")
+                .Validate(o => o.EnqueueTimeoutMs > 0, "Reliability:EnqueueTimeoutMs 必须大于 0")
+                .Validate(o => o.ForwardTimeoutMs > 0, "Reliability:ForwardTimeoutMs 必须大于 0")
+                .Validate(o => o.ShutdownDrainTimeoutMs > 0, "Reliability:ShutdownDrainTimeoutMs 必须大于 0")
+                .Validate(o => o.RetryBaseDelayMs > 0, "Reliability:RetryBaseDelayMs 必须大于 0")
+                .Validate(o => o.RetryMaxDelayMs >= o.RetryBaseDelayMs,
+                    "Reliability:RetryMaxDelayMs 不能小于 Reliability:RetryBaseDelayMs")
+                .Validate(o => string.Equals(o.DeliverySemantics, "AtLeastOnce", StringComparison.OrdinalIgnoreCase),
+                    "Reliability:DeliverySemantics 目前只支持 AtLeastOnce")
+                .ValidateOnStart();
+
             services.Configure<WebOptions>(configuration.GetSection("Web"));
             services.Configure<AuditStorageOptions>(configuration.GetSection("AuditStorage"));
 
@@ -159,6 +248,11 @@ namespace MqttRelayService
                 services.AddSingleton<IAuditRepository, AuditRepository>();
                 services.AddSingleton<IMetricsService, MetricsService>();
 
+                // 延迟解析包装器：装饰器与被装饰依赖之间存在构造期互相依赖
+                // （MetricsService 依赖 IMessageQueue/IClientRegistry，而这两个装饰器又需要 IMetricsService），
+                // 工厂委托形式的注册让容器无法静态识别该环，必须由延迟解析在首次使用时打破。
+                services.AddSingleton(typeof(LazyService<>));
+
                 services.AddSingleton<ClientRegistry>();
                 services.AddSingleton<DeadLetterService>();
                 services.AddSingleton<InMemoryMessageQueue>();
@@ -167,22 +261,24 @@ namespace MqttRelayService
                 services.AddSingleton<IClientRegistry>(sp =>
                     new Services.Implementations.Decorators.MetricsClientRegistry(
                         sp.GetRequiredService<ClientRegistry>(),
-                        sp.GetRequiredService<IAuditRepository>()));
+                        sp.GetRequiredService<LazyService<IMetricsService>>()));
 
                 services.AddSingleton<IDeadLetterService>(sp =>
                     new Services.Implementations.Decorators.MetricsDeadLetterService(
                         sp.GetRequiredService<DeadLetterService>(),
-                        sp.GetRequiredService<IMetricsService>()));
+                        sp.GetRequiredService<IMetricsService>(),
+                        sp.GetRequiredService<ILogger<Services.Implementations.Decorators.MetricsDeadLetterService>>()));
 
                 services.AddSingleton<IMessageQueue>(sp =>
                     new Services.Implementations.Decorators.MetricsMessageQueue(
                         sp.GetRequiredService<InMemoryMessageQueue>(),
-                        sp.GetRequiredService<IMetricsService>()));
+                        sp.GetRequiredService<LazyService<IMetricsService>>()));
 
                 services.AddSingleton<IMqttBrokerHost>(sp =>
                     new Services.Implementations.Decorators.MetricsMqttBrokerHost(
                         sp.GetRequiredService<MqttBrokerHost>(),
-                        sp.GetRequiredService<IMetricsService>()));
+                        sp.GetRequiredService<IMetricsService>(),
+                        sp.GetRequiredService<ILogger<Services.Implementations.Decorators.MetricsMqttBrokerHost>>()));
             }
             else
             {
@@ -237,19 +333,18 @@ namespace MqttRelayService
                 string? startDate,
                 string? endDate) =>
             {
-                int p = page ?? 1;
-                int ps = pageSize ?? 10;
-                DateTime? start = null;
-                if (!string.IsNullOrEmpty(startDate) && DateTime.TryParse(startDate, out var st))
+                if (!TryParseFilterDate(startDate, out var start) || !TryParseFilterDate(endDate, out var end))
                 {
-                    start = st;
+                    return Results.BadRequest(new { error = "startDate/endDate 必须是可解析的日期时间。" });
                 }
 
-                DateTime? end = null;
-                if (!string.IsNullOrEmpty(endDate) && DateTime.TryParse(endDate, out var et))
+                if (start.HasValue && end.HasValue && start.Value > end.Value)
                 {
-                    end = et;
+                    return Results.BadRequest(new { error = "startDate 不能晚于 endDate。" });
                 }
+
+                var p = NormalizePage(page);
+                var ps = NormalizePageSize(pageSize);
 
                 var result = await auditRepo.GetPagedMessagesAsync(p, ps, status, topic, sourceClientId, search, start, end);
                 return Results.Ok(new { total = result.TotalCount, items = result.Items });
@@ -332,8 +427,9 @@ namespace MqttRelayService
                 string? eventType,
                 string? search) =>
             {
-                int p = page ?? 1;
-                int ps = pageSize ?? 10;
+                var p = NormalizePage(page);
+                var ps = NormalizePageSize(pageSize);
+
                 var result = await auditRepo.GetPagedClientHistoryAsync(p, ps, clientId, eventType, search);
                 return Results.Ok(new { total = result.TotalCount, items = result.Items });
             });
@@ -369,12 +465,15 @@ namespace MqttRelayService
             async Task ServeDashboardAsync(HttpContext context)
             {
                 context.Response.ContentType = "text/html; charset=utf-8";
+                // 页面不再内嵌任何密钥：早期实现把 Web:ApiKey 明文注入到无需鉴权的 / 与 /index.html，
+                // 使 X-Api-Key 认证彻底失效。现在由运维在页面上录入密钥，且只保存在浏览器 sessionStorage。
+                context.Response.Headers.CacheControl = "no-store";
+
                 var htmlPath = Path.Combine(staticFilesDir, "index.html");
                 if (File.Exists(htmlPath))
                 {
                     var html = await File.ReadAllTextAsync(htmlPath);
-                    var webOptions = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<WebOptions>>().Value;
-                    await context.Response.WriteAsync(BuildDashboardHtml(html, webOptions));
+                    await context.Response.WriteAsync(html);
                 }
                 else
                 {
@@ -387,21 +486,41 @@ namespace MqttRelayService
             app.MapGet("/index.html", ServeDashboardAsync);
         }
 
-        private static string BuildDashboardHtml(string html, WebOptions webOptions)
+        /// <summary>
+        /// 收敛页码，避免超大页码产生负数 Skip 偏移。
+        /// </summary>
+        private static int NormalizePage(int? page)
         {
-            var bootstrapJson = JsonSerializer.Serialize(new
-            {
-                apiKey = string.IsNullOrWhiteSpace(webOptions.ApiKey) ? null : webOptions.ApiKey
-            });
+            return Math.Clamp(page ?? 1, 1, MaxApiPageNumber);
+        }
 
-            var bootstrapScript = $"<script>window.__dashboardAuth = {bootstrapJson};</script>";
-            var headCloseIndex = html.IndexOf("</head>", StringComparison.OrdinalIgnoreCase);
-            if (headCloseIndex >= 0)
+        /// <summary>
+        /// 收敛页长，避免调用方用超大 pageSize 一次性物化整张审计表。
+        /// </summary>
+        private static int NormalizePageSize(int? pageSize)
+        {
+            return Math.Clamp(pageSize ?? 10, 1, MaxApiPageSize);
+        }
+
+        /// <summary>
+        /// 解析筛选日期参数。解析失败必须返回 400，
+        /// 不能让调用方拿到"未按时间过滤"的结果集却以为已经过滤。
+        /// </summary>
+        private static bool TryParseFilterDate(string? raw, out DateTime? value)
+        {
+            value = null;
+            if (string.IsNullOrEmpty(raw))
             {
-                return html.Insert(headCloseIndex, bootstrapScript);
+                return true;
             }
 
-            return bootstrapScript + html;
+            if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed))
+            {
+                value = parsed;
+                return true;
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -409,12 +528,13 @@ namespace MqttRelayService
         /// </summary>
         internal static void RegisterHostedServices(IServiceCollection services)
         {
-            // 注意：Host 按注册逆序停止，因此先注册的 Worker 会后停止
-            // BrokerWorker 必须先停止，阻断新的 MQTT 发布入口
-            // DeliveryWorker 随后停止并排空队列，避免停机窗口内新消息入队后无人消费
+            // 注意：Host 按注册逆序停止，因此先注册的 Worker 会后停止。
+            // 停机顺序必须是：QueueMetricsWorker（最后停）→ BrokerWorker → DeliveryWorker（最先停）。
+            // DeliveryWorker 先停止，先封堵客户端新发布入口，再取消消费者并排空队列；
+            // 此时 Broker 仍在运行，排空阶段才能继续向订阅者注入消息。
             services.AddHostedService<QueueMetricsWorker>();
-            services.AddHostedService<DeliveryWorker>();
             services.AddHostedService<BrokerWorker>();
+            services.AddHostedService<DeliveryWorker>();
         }
     }
 

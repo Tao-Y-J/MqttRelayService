@@ -88,17 +88,32 @@ namespace MqttRelayService.Services.Implementations
             var topicParts = topic.Split('/');
             var subParts = subscription.Split('/');
 
+            // MQTT 规范：订阅过滤器以 # 或 + 开头时，不得匹配以 $ 开头的主题
+            if (topicParts.Length > 0 && topicParts[0].StartsWith('$'))
+            {
+                var firstLevel = subParts.Length > 0 ? subParts[0] : string.Empty;
+                if (firstLevel == "#" || firstLevel == "+")
+                {
+                    return false;
+                }
+            }
+
             for (int i = 0; i < subParts.Length; i++)
             {
-                // # 通配符匹配所有剩余层级
+                // # 通配符匹配该层级及所有后续层级，且规范要求它只能出现在过滤器末级
                 if (subParts[i] == "#")
                 {
-                    return true;
+                    return i == subParts.Length - 1;
                 }
 
                 // + 通配符匹配单层
                 if (subParts[i] == "+")
                 {
+                    if (i >= topicParts.Length)
+                    {
+                        return false;
+                    }
+
                     continue;
                 }
 

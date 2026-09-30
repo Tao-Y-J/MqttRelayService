@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -648,6 +648,12 @@
             background: rgba(239, 68, 68, 0.15);
             color: var(--color-danger);
             border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+
+        .badge-rejected {
+            background: rgba(148, 163, 184, 0.15);
+            color: var(--text-secondary);
+            border: 1px solid rgba(148, 163, 184, 0.3);
         }
 
         /* 代码/字形风格 */
@@ -1474,18 +1480,54 @@
             activeCount: 0
         };
         let throughputSyncTimer = null;
-        const dashboardAuth = window.__dashboardAuth || { apiKey: null };
+        const apiKeyStorageKey = 'mqtt-relay-api-key';
+        let dashboardApiKey = null;
+        try {
+            dashboardApiKey = window.sessionStorage.getItem(apiKeyStorageKey);
+        } catch (e) {
+            // 隐私模式或存储被禁用时降级为仅内存保存
+            dashboardApiKey = null;
+        }
 
-        function dashboardFetch(input, init = {}) {
-            const headers = new Headers(init.headers || {});
-            if (dashboardAuth.apiKey) {
-                headers.set('X-Api-Key', dashboardAuth.apiKey);
+        function promptForApiKey() {
+            const input = window.prompt('该管理面板已启用 API Key 鉴权，请输入 appsettings.json 中 Web:ApiKey 的值：', '');
+            if (!input) {
+                return null;
             }
 
-            return fetch(input, {
-                ...init,
-                headers
-            });
+            try {
+                window.sessionStorage.setItem(apiKeyStorageKey, input);
+            } catch (e) {
+                // 忽略存储失败，密钥仅在当前内存会话中生效
+            }
+
+            dashboardApiKey = input;
+            return input;
+        }
+
+        async function dashboardFetch(input, init = {}) {
+            const doFetch = (key) => {
+                const headers = new Headers(init.headers || {});
+                if (key) {
+                    headers.set('X-Api-Key', key);
+                }
+
+                return fetch(input, {
+                    ...init,
+                    headers
+                });
+            };
+
+            // 页面不再由服务端注入密钥：运维首次访问时在弹窗中录入，密钥只保存在浏览器 sessionStorage。
+            let response = await doFetch(dashboardApiKey);
+            if (response.status === 401) {
+                const key = promptForApiKey();
+                if (key) {
+                    response = await doFetch(key);
+                }
+            }
+
+            return response;
         }
 
         // 1. 在线客户端分页状态
@@ -1832,16 +1874,16 @@
                 recentTbody.innerHTML = `<tr><td colspan="8" class="empty-state"><i class="fa-solid fa-envelope-open"></i><span>当前无在途或已完成的消息流</span></td></tr>`;
             } else {
                 recentTbody.innerHTML = recentLogs.map(log => `
-                            <tr class="tr-clickable" onclick="openMessageDetail('${log.messageId}')">
+                            <tr class="tr-clickable" onclick="openMessageDetail('${encodeURIComponent(log.messageId)}')">
                                 ${buildCell(formatTime(log.timestamp), 'code-text cell-tight', formatTime(log.timestamp))}
                                 ${buildCell(escapeHtml(formatMiddleEllipsis(log.messageId, 14, 10)), 'code-text cell-code-wide', log.messageId)}
                                 ${buildCell(escapeHtml(log.sourceClientId || ''), 'code-bold cell-main', log.sourceClientId)}
                                 ${buildCell(escapeHtml(log.topic || ''), 'code-text cell-topic', log.topic)}
                                 ${buildCell(`QoS ${log.qos} ${log.retain ? '| Retain' : ''}`, 'code-text cell-tight', `QoS ${log.qos}${log.retain ? ' | Retain' : ''}`)}
-                                ${buildCell(`<span class="badge badge-${log.status.toLowerCase()}">${getStatusChinese(log.status)}</span>`, 'cell-tight', getStatusChinese(log.status))}
-                                ${buildCell(getHitBadge(log), 'cell-tight', log.matchedSubscriberCount > 0 ? '命中' : '未命中')}
+                                ${buildCell(`<span class="badge badge-${escapeHtml(String(log.status).toLowerCase())}">${getStatusChinese(log.status)}</span>`, 'cell-tight', getStatusChinese(log.status))}
+                                ${buildCell(getHitBadge(log), 'cell-tight', log.isSubscriberHit ? '命中' : '未命中')}
                                 <td class="cell-action">
-                                    <button class="btn-action" onclick="openMessageDetail('${log.messageId}'); event.stopPropagation();">
+                                    <button class="btn-action" onclick="openMessageDetail('${encodeURIComponent(log.messageId)}'); event.stopPropagation();">
                                         <i class="fa-solid fa-eye"></i> 查看
                                     </button>
                                 </td>
@@ -1945,16 +1987,16 @@
 
             tbody.innerHTML = paginatedList.map(c => `
                         <tr>
-                            <td class="code-bold">${c.clientId}</td>
-                            <td class="code-text">${c.username || '<匿名连接>'}</td>
+                            <td class="code-bold">${escapeHtml(c.clientId)}</td>
+                            <td class="code-text">${c.username ? escapeHtml(c.username) : '<匿名连接>'}</td>
                             <td><span class="badge badge-succeeded">在线</span></td>
-                            <td class="code-text">${c.connectedAt}</td>
-                            <td class="code-text">${c.lastActivityAt}</td>
+                            <td class="code-text">${escapeHtml(c.connectedAt)}</td>
+                            <td class="code-text">${escapeHtml(c.lastActivityAt)}</td>
                             <td>
                                 <div class="sub-tag-container">
                                     ${c.subscriptions.length === 0
                     ? '<span class="code-text" style="color: var(--text-muted)">无订阅主题</span>'
-                    : c.subscriptions.map(topic => `<span class="sub-tag">${topic}</span>`).join('')}
+                    : c.subscriptions.map(topic => `<span class="sub-tag">${escapeHtml(topic)}</span>`).join('')}
                                 </div>
                             </td>
                         </tr>
@@ -2141,17 +2183,17 @@
             }
 
             tbody.innerHTML = items.map(log => `
-                        <tr class="tr-clickable" onclick="openMessageDetail('${log.messageId}')">
+                        <tr class="tr-clickable" onclick="openMessageDetail('${encodeURIComponent(log.messageId)}')">
                             ${buildCell(new Date(log.createdAt || log.timestamp).toLocaleString(), 'code-text cell-tight', new Date(log.createdAt || log.timestamp).toLocaleString())}
                             ${buildCell(escapeHtml(formatMiddleEllipsis(log.messageId, 18, 12)), 'code-text cell-code-wide', log.messageId)}
                             ${buildCell(escapeHtml(log.sourceClientId || ''), 'code-bold cell-main', log.sourceClientId)}
                             ${buildCell(escapeHtml(log.topic || ''), 'code-text cell-topic', log.topic)}
                             ${buildCell(formatLatency(log.latencyMs), 'code-text cell-tight', formatLatency(log.latencyMs))}
                             ${buildCell(`${log.retryCount} 次`, 'code-text cell-tight', `${log.retryCount} 次`)}
-                            ${buildCell(`<span class="badge badge-${log.status.toLowerCase()}">${getStatusChinese(log.status)}</span>`, 'cell-tight', getStatusChinese(log.status))}
-                            ${buildCell(getHitBadge(log), 'cell-tight', log.matchedSubscriberCount > 0 ? '命中' : '未命中')}
+                            ${buildCell(`<span class="badge badge-${escapeHtml(String(log.status).toLowerCase())}">${getStatusChinese(log.status)}</span>`, 'cell-tight', getStatusChinese(log.status))}
+                            ${buildCell(getHitBadge(log), 'cell-tight', log.isSubscriberHit ? '命中' : '未命中')}
                             <td class="cell-action">
-                                <button class="btn-action" onclick="openMessageDetail('${log.messageId}'); event.stopPropagation();">
+                                <button class="btn-action" onclick="openMessageDetail('${encodeURIComponent(log.messageId)}'); event.stopPropagation();">
                                     <i class="fa-solid fa-eye"></i> 查看
                                 </button>
                             </td>
@@ -2243,15 +2285,15 @@
             }
 
             tbody.innerHTML = items.map(log => `
-                        <tr class="tr-clickable" onclick="openMessageDetail('${log.messageId}')" style="background: rgba(239, 68, 68, 0.015);">
-                            <td class="code-text">${new Date(log.createdAt || log.timestamp).toLocaleString()}</td>
-                            <td class="code-text">${log.messageId}</td>
-                            <td class="code-bold">${log.sourceClientId}</td>
-                            <td class="code-text" style="color: var(--color-danger)">${log.topic}</td>
-                            <td class="code-text">${log.retryCount} 次</td>
-                            <td class="code-text" style="color: #fca5a5; font-size: 0.85rem;">${log.errorMessage || '转发多次失败且超过最大退避重试限制'}</td>
+                        <tr class="tr-clickable" onclick="openMessageDetail('${encodeURIComponent(log.messageId)}')" style="background: rgba(239, 68, 68, 0.015);">
+                            <td class="code-text">${escapeHtml(new Date(log.createdAt || log.timestamp).toLocaleString())}</td>
+                            <td class="code-text">${escapeHtml(log.messageId)}</td>
+                            <td class="code-bold">${escapeHtml(log.sourceClientId)}</td>
+                            <td class="code-text" style="color: var(--color-danger)">${escapeHtml(log.topic)}</td>
+                            <td class="code-text">${escapeHtml(log.retryCount)} 次</td>
+                            <td class="code-text" style="color: #fca5a5; font-size: 0.85rem;">${escapeHtml(log.errorMessage || '转发多次失败且超过最大退避重试限制')}</td>
                             <td style="text-align: center;">
-                                <button class="btn-action" onclick="openMessageDetail('${log.messageId}'); event.stopPropagation();">
+                                <button class="btn-action" onclick="openMessageDetail('${encodeURIComponent(log.messageId)}'); event.stopPropagation();">
                                     <i class="fa-solid fa-eye"></i> 查看
                                 </button>
                             </td>
@@ -2290,7 +2332,10 @@
         }
 
         // ==================== 抽屉式消息载荷与元数据审计 ====================
-        function openMessageDetail(messageId) {
+        function openMessageDetail(encodedMessageId) {
+            // 内联 onclick 中统一使用 encodeURIComponent 传递消息 ID，
+            // 避免服务端标识中的引号越出 JS 字符串边界造成注入。
+            const messageId = decodeURIComponent(encodedMessageId == null ? '' : String(encodedMessageId));
             let log = null;
 
             if (rawMetrics) {
@@ -2444,7 +2489,9 @@
                 case 'Succeeded': return '转发成功';
                 case 'Failed': return '注入失败';
                 case 'DeadLetter': return '死信隔离';
-                default: return status;
+                case 'Rejected': return '队列丢弃';
+                // 未知状态同样按文本渲染，绝不能把服务端字符串直接当 HTML 使用
+                default: return escapeHtml(status);
             }
         }
 

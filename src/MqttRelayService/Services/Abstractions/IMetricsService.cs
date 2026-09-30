@@ -20,6 +20,13 @@ namespace MqttRelayService.Services.Abstractions
         void RecordRejected();
 
         /// <summary>
+        /// 记录一条因队列满载/入队超时而未进入队列的消息，并写入终态审计记录，
+        /// 避免该消息在审计表里永久停留在 Queued 造成 Dashboard 待处理数虚高。
+        /// </summary>
+        /// <param name="message">被丢弃的消息实例</param>
+        void RecordRejectedMessage(ForwardMessage message);
+
+        /// <summary>
         /// 记录消息转发结果
         /// </summary>
         /// <param name="context">路由上下文</param>
@@ -34,6 +41,13 @@ namespace MqttRelayService.Services.Abstractions
         /// </summary>
         /// <param name="record">死信记录模型</param>
         void RecordDeadLetter(DeadLetterRecord record);
+
+        /// <summary>
+        /// 记录一条客户端连接/断开/订阅历史。
+        /// 实现必须是非阻塞入队语义：MQTT 事件回调不允许在此同步访问数据库。
+        /// </summary>
+        /// <param name="record">客户端历史记录</param>
+        void RecordClientHistory(ClientConnectionHistoryRecord record);
 
         /// <summary>
         /// 获取当前所有统计指标的聚合快照，用于 Dashboard 前端展示

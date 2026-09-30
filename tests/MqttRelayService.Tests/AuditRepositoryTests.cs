@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -62,6 +62,40 @@ namespace MqttRelayService.Tests
         {
             CleanDatabase();
             GC.SuppressFinalize(this);
+        }
+
+        [Fact]
+        public async Task GetPagedMessagesAsync_ShouldClampPagingParameters()
+        {
+            await _repository.InitializeAsync();
+
+            var records = Enumerable.Range(0, 250)
+                .Select(i => new MessageAuditRecord
+                {
+                    MessageId = $"clamp_{i:D4}",
+                    Topic = "clamp/topic",
+                    SourceClientId = "clamp_client",
+                    PayloadSize = 1,
+                    Status = "Succeeded",
+                    CreatedAt = DateTime.Now,
+                    UpdatedAt = DateTime.Now.AddMilliseconds(i)
+                })
+                .ToList();
+
+            await _repository.RecordMessageAuditsAsync(records);
+
+            // 超大 pageSize 必须被收敛到仓储上限，绝不能一次性物化整张审计表
+            var hugePage = await _repository.GetPagedMessagesAsync(1, int.MaxValue);
+            Assert.Equal(200, hugePage.Items.Count);
+
+            // 非法小页长必须被抬升到 1，而不是返回 0 条
+            var zeroPageSize = await _repository.GetPagedMessagesAsync(1, 0);
+            Assert.Single(zeroPageSize.Items);
+
+            // 超大页码必须收敛，不能产生负 offset 或抛异常
+            var farPage = await _repository.GetPagedMessagesAsync(int.MaxValue, 10);
+            Assert.Empty(farPage.Items);
+            Assert.Equal(250, farPage.TotalCount);
         }
 
         [Fact]

@@ -13,6 +13,8 @@
 
 当前版本已经具备可运行主链路：MQTT Broker 启停、异常停止自动重启、基础认证、在线客户端注册、订阅跟踪、内部有界队列、后台异步转发、重试、死信、优雅停机、队列指标快照和 Windows Service 安装/卸载脚本。
 
+当前版本还内置了 Web 管理面（`Web:Enabled` 默认 `true`，监听 `Web:Port` 默认 5000）：`/api` 指标与审计查询端点、运维大屏 `wwwroot/index.html`、基于 SqlSugar ORM 的消息审计与客户端连接历史持久化、按停机安全顺序注册的后台服务，以及 MPS 限速与动态并发调控。
+
 当前版本不内置磁盘队列，可靠性边界仍然是“进程存活期间的至少一次转发”。
 
 ## 1. 项目概述
@@ -22,7 +24,7 @@
 
 技术选型要求如下：
 
-- 宿主模型：`.NET Worker Service`
+- 宿主模型：`.NET Worker Service`；`Web:Enabled=true`（默认）时以 `WebApplication` 承载同一个 Host（`Microsoft.NET.Sdk.Web`），`Web:Enabled=false` 时退回纯 Worker Host
 - 部署形态：`Windows Service`
 - MQTT 组件：`MQTTnet`
 - 配置方式：`appsettings.json`
@@ -55,7 +57,6 @@
 - 多节点 Broker 共享会话
 - 离线消息持久化到远程基础设施
 - Retained Message 的高级持久化策略
-- Web 管理后台
 - 大规模分布式路由
 - 与外部 Broker 桥接
 - 高级 ACL 规则引擎
@@ -86,7 +87,7 @@
 ### 4.2 推荐架构分层
 
 ```text
-Host (Worker Service / Windows Service)
+Host (Worker Service / Windows Service / 可选的 Kestrel Web 管理面)
 ├─ BrokerHost
 │  ├─ 启动 MQTT Server
 │  ├─ 监听客户端连接/断开
@@ -109,8 +110,12 @@ Host (Worker Service / Windows Service)
 │  └─ 配置读取与绑定
 ├─ Logging
 │  └─ 控制台日志 / 文件日志 / 错误日志 / 审计字段
-└─ Metrics
-   └─ 队列长度与峰值快照
+├─ Metrics
+│  └─ 队列长度与峰值快照
+└─ Web 管理面（Web:Enabled=true 时）
+   ├─ /api 指标、消息审计与客户端历史查询端点
+   ├─ wwwroot 运维大屏
+   └─ AuditRepository 审计持久化
 ```
 
 ### 4.3 架构原则
@@ -131,15 +136,64 @@ src/MqttRelayService
 ├─ Program.cs
 ├─ Workers
 │  ├─ BrokerWorker.cs
-│  └─ QueueMetricsWorker.cs
+│  ├─ QueueMetricsWorker.cs
+│  └─ DeliveryWorker.cs
 ├─ Logging
 │  └─ SerilogLogging.cs
 ├─ Options
+│  ├─ ServiceOptions.cs
+│  ├─ MqttOptions.cs
+│  ├─ AuthOptions.cs
+│  ├─ RoutingOptions.cs
+│  ├─ ReliabilityOptions.cs
+│  ├─ WebOptions.cs
+│  └─ AuditStorageOptions.cs
 ├─ Models
+│  ├─ ClientSessionInfo.cs
+│  ├─ ConnectionStatus.cs
+│  ├─ RouteContext.cs
+│  ├─ ForwardMessage.cs
+│  ├─ MessageProcessStatus.cs
+│  ├─ ForwardResult.cs
+│  ├─ DeadLetterRecord.cs
+│  ├─ AuthRequest.cs
+│  ├─ AuthResult.cs
+│  ├─ MessageAuditRecord.cs
+│  ├─ ClientConnectionHistoryRecord.cs
+│  └─ MessageContext.cs
 ├─ Services
 │  ├─ Abstractions
+│  │  ├─ IMqttBrokerHost.cs
+│  │  ├─ IClientRegistry.cs
+│  │  ├─ IMessageRouter.cs
+│  │  ├─ IAuthService.cs
+│  │  ├─ IMessageQueue.cs
+│  │  ├─ IMessageDeliveryService.cs
+│  │  ├─ IDeadLetterService.cs
+│  │  ├─ IRetryPolicyProvider.cs
+│  │  ├─ IMetricsService.cs
+│  │  └─ IAuditRepository.cs
 │  └─ Implementations
+│     ├─ MqttBrokerHost.cs
+│     ├─ ClientRegistry.cs
+│     ├─ MessageRouter.cs
+│     ├─ AuthService.cs
+│     ├─ InMemoryMessageQueue.cs
+│     ├─ MessageDeliveryService.cs
+│     ├─ DeadLetterService.cs
+│     ├─ RetryPolicyProvider.cs
+│     ├─ MetricsService.cs
+│     ├─ AuditRepository.cs
+│     └─ Decorators
+│        ├─ MetricsMessageQueue.cs
+│        ├─ MetricsMqttBrokerHost.cs
+│        ├─ MetricsDeadLetterService.cs
+│        └─ MetricsClientRegistry.cs
+├─ wwwroot
+│  └─ index.html
 ├─ Utilities
+│  ├─ MessagePayloadFormatter.cs
+│  └─ ThroughputController.cs
 ├─ Scripts
 │  ├─ install-service.cmd
 │  ├─ install-service.ps1
@@ -149,7 +203,7 @@ src/MqttRelayService
 └─ appsettings.Development.json
 ```
 
-服务接口统一位于 `Services/Abstractions`，实现统一位于 `Services/Implementations`。`Program.cs` 只负责 Host 构建、配置校验、日志接入和依赖注入，不承载业务编排。
+服务接口统一位于 `Services/Abstractions`（10 个接口），实现统一位于 `Services/Implementations`（10 个实现 + 4 个 `Decorators` 装饰器）。装饰器只在 `Web:Enabled=true` 时注册，用于把指标采集与审计历史记录无侵入地挂到 `IClientRegistry`、`IDeadLetterService`、`IMessageQueue`、`IMqttBrokerHost` 上。`Program.cs` 只负责 Host 构建、配置校验、日志接入和依赖注入，不承载业务编排。
 
 ---
 
@@ -171,6 +225,8 @@ src/MqttRelayService
 - 服务启动成功后，日志中输出启动成功信息
 - 服务能监听配置端口
 - 客户端可正常发起 MQTT 连接
+- `Web:Enabled=true`（默认）时，同一个进程额外在 `Web:Port`（默认 5000）上提供 `/api` 指标与审计端点及运维大屏，启动日志输出该端口与 API 认证状态
+- `Web:Enabled=false` 时只启动 Worker Host，不创建 Kestrel 监听
 
 ---
 
@@ -415,17 +471,32 @@ public interface IMessageRouter
   },
   "Reliability": {
     "DeliverySemantics": "AtLeastOnce",
-    "QueueCapacity": 1000,
-    "EnqueueTimeoutMs": 2000,
-    "MaxConcurrentHandlers": 1,
+    "QueueCapacity": 10000,
+    "EnqueueTimeoutMs": 5000,
+    "MaxConcurrentHandlers": 3,
     "MaxRetryCount": 3,
+    "MaxPendingRetryTasks": 1000,
     "RetryBaseDelayMs": 1000,
     "RetryMaxDelayMs": 30000,
     "EnableDeadLetter": true,
     "DeadLetterPath": "data/deadletter",
+    "DeadLetterRetentionDays": 30,
     "ForwardTimeoutMs": 5000,
-    "ShutdownDrainTimeoutMs": 10000,
-    "DropWhenQueueFull": false
+    "ShutdownDrainTimeoutMs": 30000,
+    "DropWhenQueueFull": false,
+    "MaxConcurrencyHardLimit": 200
+  },
+  "Web": {
+    "Enabled": true,
+    "Port": 5000,
+    "ApiKey": null
+  },
+  "AuditStorage": {
+    "Provider": "Sqlite",
+    "ConnectionString": "Data Source=data/audit.db",
+    "AutoInitializeSchema": true,
+    "MessageArchiveThreshold": 5000000,
+    "ClientHistoryArchiveThreshold": 1000000
   },
   "Serilog": {
     "FileNamePrefix": "relay",
@@ -449,6 +520,12 @@ public interface IMessageRouter
 - 当前默认配置允许匿名认证，便于本地联调；生产环境应关闭 `Auth:AllowAnonymous`，并配置账号列表
 - 匿名认证只保留 `Auth:AllowAnonymous` 一个配置项，`Mqtt` 配置不再提供匿名开关
 - `Service:Name` 同时作为 Windows Service 名称和日志扩展属性
+- `Reliability:MaxPendingRetryTasks` 限制运行期后台重试调度任务数量，超限消息直接进入死信；配置值小于 1 时运行期回退到 `QueueCapacity`
+- `Reliability:DeadLetterRetentionDays` 控制死信日期目录保留天数，默认 30；配置为 0 或负数表示不清理，需由运维手工维护
+- `Reliability:MaxConcurrencyHardLimit` 是吞吐并发度硬上限，限制运行期通过 API 上调的最大并发
+- `Reliability:DeliverySemantics` 只支持 `AtLeastOnce`，其他取值在启动校验阶段直接失败
+- `Web:Enabled` 控制是否创建 Web 宿主；`Web:ApiKey` 为空时 `/api` 端点跳过鉴权，否则校验请求头 `X-Api-Key`
+- `AuditStorage` 配置审计持久化：Provider、连接串、自动建表，以及两张审计表的归档阈值（只提示运维迁移，不自动删除数据）
 
 ---
 
@@ -647,11 +724,12 @@ MQTT 事件回调中不得直接执行复杂、耗时或不稳定逻辑。
 
 ### 队列满载策略
 
-必须通过配置选择以下策略之一：
+队列统一使用 `BoundedChannelFullMode.Wait`，满载行为由 `Reliability:DropWhenQueueFull` 与 `Reliability:EnqueueTimeoutMs` 组合决定：
 
-1. 拒绝新消息并记录错误
-2. 阻塞等待有限时间后失败
-3. 写入失败日志并触发告警
+1. `DropWhenQueueFull=true`：应用层预检 `Count >= Capacity`，满载立即返回 `false` 并记录 Warning
+2. `DropWhenQueueFull=false`（默认）：等待写入，超过 `EnqueueTimeoutMs` 后记录 Warning 并返回 `false`
+
+入队失败消息由 `MetricsMessageQueue` 装饰器写入 `Status="Rejected"` 终态审计，不会静默消失。
 
 ### 明确禁止
 
@@ -667,18 +745,18 @@ MQTT 事件回调中不得直接执行复杂、耗时或不稳定逻辑。
 
 为了提高可靠性，服务需要支持“消息进入转发流程后尽量不丢”。
 
-### 第一版最低要求
+### 实际实现
 
-至少提供以下两档实现能力中的一种：
+实际实现的是内存可靠队列：
 
-#### 档位 A：内存可靠队列
+#### 内存可靠队列
 - 消息进入内部队列后再处理
-- 适合第一版快速落地
+- 队列为有界 `System.Threading.Channels` 队列，容量由 `Reliability:QueueCapacity` 控制
 - 服务进程崩溃时，内存中未处理消息可能丢失
 
 ### 强制要求
 
-当前项目不内置磁盘队列，必须在文档中明确声明：
+当前项目不内置磁盘队列，仓库文档已明确声明：
 
 > 当前版本只能保证进程存活期间的至少一次转发；若进程异常退出，尚未完成转发的内存消息可能丢失。
 
@@ -735,25 +813,27 @@ MQTT 事件回调中不得直接执行复杂、耗时或不稳定逻辑。
 
 转发失败且超过最大重试次数的消息，必须进入死信通道，而不是直接丢弃。
 
-### 最低要求
+### 实现方式
 
-至少实现以下一种：
+实际实现为死信文件目录：`DeadLetterService` 把每条死信记录序列化为 JSON，写入 `Reliability:DeadLetterPath` 下的 `yyyyMMdd` 日期目录，文件名为 `{MessageId}.json`。
 
-- 死信文件目录
-- 死信 SQLite 表
-- 死信日志单独输出
+写盘使用"独立强制超时 + 临时文件再 `File.Move(overwrite: true)`"的原子落盘：先写 `{MessageId}.json.tmp` 再替换目标文件，避免写盘被中断时死信目录残留半截 JSON。写盘超时不继承停机截止 token，而是使用 `ShutdownForceTimeoutMs = 5000` 的独立强制超时；继承停机截止 token 会在写盘中途取消，留下半截 JSON 而消息已出队无法回队。
+
+写入失败时会把消息重新入队保留，退避等待受生命周期 token 约束（停机时可立即中断）；连续写入失败次数超过 `MaxRetryCount` 后停止回队。`Reliability:EnableDeadLetter=false` 时死信被显式关闭，消息直接丢弃并以 Error 级别记录。
+
+死信日期目录按 `Reliability:DeadLetterRetentionDays`（默认 30，0 或负数表示不清理）清理，每天最多扫描一次，清理失败只记录 Warning，不影响死信写入主流程。
 
 ### 每条死信至少记录
 
-- 消息唯一标识
-- 原始 Topic
-- 来源 ClientId
-- 目标 ClientId 或目标规则
-- Payload 摘要
-- 首次接收时间
-- 最后失败时间
-- 失败原因
-- 已重试次数
+- 消息唯一标识（`MessageId`）
+- 原始 Topic（`Topic`）
+- 来源 ClientId（`SourceClientId`）
+- 目标摘要（`TargetClientId`，由 `MessageDeliveryService.BuildTargetSummary` 生成：无命中订阅者时写"无命中订阅者（按 Topic 注入）"，命中时写命中订阅者数量与前 5 个 ClientId 列表）
+- Payload（`PayloadBase64`，Base64 编码）
+- 首次接收时间（`FirstReceivedAt`）
+- 最后失败时间（`LastFailedAt`）
+- 失败原因（`FailureReason`）
+- 已重试次数（`RetryCount`）
 
 ---
 
@@ -831,15 +911,18 @@ MQTT 事件回调中不得直接执行复杂、耗时或不稳定逻辑。
 - 死信写入
 - 停机排空等待
 
-### 推荐默认值
+### 实际超时值
 
-- 入队超时：2 秒
-- 单次转发超时：5 秒
-- 死信写入超时：3 秒
+- 入队超时：`Reliability:EnqueueTimeoutMs`，默认 5 秒
+- 单次转发超时：`Reliability:ForwardTimeoutMs`，默认 5 秒
+- 死信写入强制超时：`ShutdownForceTimeoutMs = 5000`（5 秒），独立于调用方的截止 token
+- 停机排空超时：`Reliability:ShutdownDrainTimeoutMs`，默认 30 秒；`HostOptions.ShutdownTimeout` 取该值加 5 秒
+- 消费者退出等待：`ConsumerShutdownWaitTimeoutMs = 2000`（2 秒）
+- 后台重试调度收敛等待：`RetrySettlementWaitTimeoutMs = 2000`（2 秒）
 
 ### 要求
 
-超时必须被明确识别、记录和计数，不得被当作普通异常模糊处理。
+超时必须被明确识别、记录和计数，不得被当作普通异常模糊处理。入队取消必须区分"调用方主动取消（向上抛 `OperationCanceledException`）"与"入队超时（返回 `false`）"，避免停机路径把本该保留的消息误判为队列满载丢弃而写成死信。
 
 ---
 
@@ -858,13 +941,17 @@ MQTT 事件回调中不得直接执行复杂、耗时或不稳定逻辑。
 
 ### 停止要求
 
-服务停止时必须：
+服务停止时按以下实际顺序执行：
 
-1. 停止接收新消息
-2. 停止接受新客户端连接
-3. 尽量完成当前正在处理的消息
-4. 在可配置超时时间内优雅退出
-5. 输出关闭完成日志
+1. `DeliveryWorker` 最先停止（Host 逆序停止注册时最后加入的后台服务），`MessageDeliveryService.StopAsync` 第一步调用 `IMqttBrokerHost.StopAcceptingClientPublishes()` 封堵客户端新发布入口
+2. 取消消费者循环的 `ReadAllAsync`，等待消费者退出（消费者取消时把在途消息保留回队列）
+3. 等待后台重试调度任务收敛
+4. 多轮收敛排空队列：先 drain 一轮，若仍有未退出消费者则用剩余排空预算等待其结束并再次 drain，直到队列空且消费者全部退出，或 `Reliability:ShutdownDrainTimeoutMs` 耗尽
+5. 记录排空计数（含转入死信条数）与剩余未处理数量
+6. `BrokerWorker` 随后停止，`MqttBrokerHost.StopAsync` 先 `StopAsync()` 再解绑事件处理器
+7. `QueueMetricsWorker` 最后停止，停机排空期间仍可观察队列长度与峰值
+
+排空阶段 Broker 必须保持运行：只有 Broker 仍在运行，排空出的剩余消息才能继续注入给订阅者；若先停 Broker，剩余消息只能烧退避并被转入死信。`BrokerWorker.StopAsync` 先调用 `base.StopAsync` 取消监控循环，再停止 Broker，避免停机期间监控循环看到 `IsRunning=false` 后触发重启。整个停机耗时上限由 `HostOptions.ShutdownTimeout`（`ShutdownDrainTimeoutMs + 5000`）约束。
 
 ---
 
@@ -920,22 +1007,28 @@ src/
     Workers/
       BrokerWorker.cs
       QueueMetricsWorker.cs
+      DeliveryWorker.cs
     Options/
       ServiceOptions.cs
       MqttOptions.cs
       AuthOptions.cs
       RoutingOptions.cs
       ReliabilityOptions.cs
+      WebOptions.cs
+      AuditStorageOptions.cs
     Models/
       ClientSessionInfo.cs
+      ConnectionStatus.cs
       RouteContext.cs
       ForwardMessage.cs
+      MessageProcessStatus.cs
       ForwardResult.cs
       DeadLetterRecord.cs
-      MessageProcessStatus.cs
-      ConnectionStatus.cs
       AuthRequest.cs
       AuthResult.cs
+      MessageAuditRecord.cs
+      ClientConnectionHistoryRecord.cs
+      MessageContext.cs
     Services/
       Abstractions/
         IMqttBrokerHost.cs
@@ -946,6 +1039,8 @@ src/
         IMessageDeliveryService.cs
         IDeadLetterService.cs
         IRetryPolicyProvider.cs
+        IMetricsService.cs
+        IAuditRepository.cs
       Implementations/
         MqttBrokerHost.cs
         ClientRegistry.cs
@@ -955,8 +1050,18 @@ src/
         MessageDeliveryService.cs
         DeadLetterService.cs
         RetryPolicyProvider.cs
+        MetricsService.cs
+        AuditRepository.cs
+        Decorators/
+          MetricsMessageQueue.cs
+          MetricsMqttBrokerHost.cs
+          MetricsDeadLetterService.cs
+          MetricsClientRegistry.cs
+    wwwroot/
+      index.html
     Utilities/
       MessagePayloadFormatter.cs
+      ThroughputController.cs
     Scripts/
       install-service.cmd
       install-service.ps1
@@ -972,8 +1077,9 @@ tests/
 说明：
 
 - 当前版本只实现 `InMemoryMessageQueue`，不提供 `DiskBackedMessageQueue`
+- `MetricsService` 与 `AuditRepository` 只在 `Web:Enabled=true` 时注册；同时注册 4 个 `Decorators` 装饰器把指标与审计历史采集挂到核心服务上
 - Windows Service 日常安装/卸载入口是 `.cmd`，实际服务操作由 `.ps1` 承担
-- 脚本随构建和发布复制到输出目录
+- 脚本与 `wwwroot` 随构建和发布复制到输出目录
 
 ---
 
@@ -982,14 +1088,19 @@ tests/
 ## 9.1 Program.cs
 
 ### 要求
-- 使用 `Host.CreateApplicationBuilder`
+- 入口从 `AppContext.BaseDirectory` 预读 `Web:Enabled`：为 `true`（默认）时走 `WebApplication.CreateBuilder`（`RunWebHostAsync`），为 `false` 时走 `Host.CreateApplicationBuilder`（`RunWorkerHost`）；`Host.CreateApplicationBuilder` 只用于 `Web:Enabled=false` 分支
 - 注册 Windows Service 支持
-- 注册 Options
+- 注册 Options，并对 `MqttOptions` 与 `ReliabilityOptions` 使用 `.Validate(...).ValidateOnStart()` 集中校验（`DeliverySemantics` 只支持 `AtLeastOnce`）
+- 调用 `ValidateAuthConfiguration` 做启动期认证配置一致性校验：`Auth:AllowAnonymous=false` 且无账号时抛 `InvalidOperationException`；`Auth:AllowAnonymous=true` 且配置了账号时记录 Warning
 - 注册核心服务
 - 注册 HostedService
-- 接入 Serilog 控制台和文件日志
+- 接入 Serilog 控制台和文件日志，并同时赋值 `Log.Logger` 静态门面
 - 设置 `BackgroundServiceExceptionBehavior.Ignore`，避免后台服务异常直接停止 Host
-- 配置 `HostOptions.ShutdownTimeout`
+- 配置 `HostOptions.ShutdownTimeout` 为 `Reliability:ShutdownDrainTimeoutMs + 5000`
+- 审计持久化初始化失败时降级为"审计不可用"，不拖停 MQTT 转发主链路
+- 启动日志输出 Web 监听端口与 API 认证状态
+- `/api/messages` 与 `/api/clients/history` 统一收敛分页参数（页长上限 200、页码上限 1000000），日期参数解析失败返回 400
+- `/` 与 `/index.html` 不内嵌 API Key，由运维在页面录入并保存在浏览器 `sessionStorage`，响应加 `Cache-Control: no-store`
 
 ---
 
@@ -1018,6 +1129,11 @@ tests/
 - 不将复杂逻辑直接写在事件回调里
 - 事件回调中只做最小必要操作
 - 收到消息后优先入队，不直接做复杂转发
+- `StartAsync` / `StopAsync` 共用生命周期锁，进程内重启先 `Dispose` 旧 Server 实例
+- 停机时 `StopAsync` 先 `StopAsync()` 再解绑 7 个事件处理器
+- `StopAcceptingClientPublishes()` 只封堵客户端新发布入口（`_acceptingClientPublishes=false`），不停止 Broker
+- `OnInterceptingPublishAsync` 对无来源标识的发布直接阻断默认分发，停机排空期同样阻断
+- 所有服务端注入都会附加 `x-relay-message-id`（有来源时额外附加 `x-source-client-id`），QoS 越界时回退 `Mqtt:DefaultQos`
 
 ---
 
@@ -1043,10 +1159,13 @@ tests/
 ## 9.6 MessageRouter
 
 ### 职责
-- 根据 Topic 规则决定消息去向
-- 过滤发送方自身
-- 完成目标客户端转发
-- 输出转发日志
+- 根据 Topic 规则决定消息去向，返回命中的订阅者清单
+- 过滤发送方自身（`EchoToSender=false`）
+- 按 MQTT 规范做通配符匹配：`#` 只在过滤器末级匹配；`#` 或 `+` 开头的过滤器不匹配 `$` 开头的主题
+
+### 边界
+- 只做匹配与目标计算，不执行注入；实际注入由 `MessageDeliveryService` 调用 `IMqttBrokerHost.PublishAsync` 完成
+- 没有 Retain 分支：`Retain=true` 且无匹配订阅者时仍注入 Broker 的逻辑在 `MessageDeliveryService.TryForwardAsync`
 
 ---
 
@@ -1057,6 +1176,7 @@ tests/
 - 管理内部待处理消息
 - 提供有界容量
 - 提供入队超时控制
+- 区分"调用方主动取消（抛 `OperationCanceledException`）"与"入队超时（返回 `false`）"
 
 ---
 
@@ -1068,6 +1188,8 @@ tests/
 - 管理消息状态
 - 执行重试
 - 超过重试次数后写入死信
+- 停机时先封堵客户端新发布入口，再取消消费者并多轮收敛排空队列
+- 生成死信目标摘要 `RouteTargetSummary`
 
 ---
 
@@ -1075,9 +1197,10 @@ tests/
 
 ### 职责
 - 接收无法成功转发的消息
-- 写入死信记录
+- 写入死信记录（临时文件 + `File.Move(overwrite: true)` 原子落盘）
 - 保留必要上下文信息
 - 输出单独错误日志
+- 按 `Reliability:DeadLetterRetentionDays` 每天最多一次清理过期日期目录
 
 ## 9.10 QueueMetricsWorker
 
@@ -1086,6 +1209,26 @@ tests/
 - 仅在队列长度或峰值变化时写出指标快照
 - 指标快照输出到运行目录下的 `data/metrics/queue-metrics.json`
 - 指标写入失败只记录 Warning，不得影响 Broker 或投递链路
+- 在停机顺序中最后停止，停机排空期间仍可观察队列状态
+
+---
+
+## 9.11 DeliveryWorker
+
+### 职责
+- 包装 `IMessageDeliveryService` 生命周期：`ExecuteAsync` 调用 `StartAsync`，`StopAsync` 调用 `StopAsync`
+- 注入 `IHostApplicationLifetime`，投递服务启动失败时调用 `StopApplication()`
+- 在停机顺序中最先停止，保证封堵与排空先于 Broker 停止
+
+---
+
+## 9.12 MetricsService 与 AuditRepository
+
+### 职责
+- `MetricsService` 维护全局原子计数、定长采样历史、有界载荷缓存（上限 100），并持有消息审计（上限 50000）与客户端历史（上限 10000）两个有界待写队列，由同一个后台 writer 批量落库
+- MQTT 事件回调只做有界入队，绝不在回调线程访问数据库
+- `AuditRepository` 负责最终态快照 Upsert、批量写入、分页查询与 Dashboard 摘要聚合；分页参数在仓储层统一收敛（页长上限 200、页码上限 1000000）
+- `InitializeAsync` 收敛上次非正常关闭残留的在途状态为 `Failed`，并按归档阈值打印迁移提示，不自动删除数据
 
 ---
 
@@ -1104,13 +1247,14 @@ tests/
 
 ### 发布方式
 - 发布为 `win-x64`
-- 当前项目固定 `RuntimeIdentifier=win-x64`，`PlatformTarget=x64`
+- 当前项目固定 `RuntimeIdentifier=win-x64`，`PlatformTarget=x64`，项目 SDK 为 `Microsoft.NET.Sdk.Web`
 - Release 构建保留嵌入式调试符号，便于排查生产日志和异常栈
-- 是否采用单文件 exe 发布由后续发布命令决定，当前项目文件不强制单文件
+- 发布为单文件 exe 还是目录形式由发布命令决定，当前项目文件不强制单文件
 
 ### 交付物
 - 可运行 exe
 - `appsettings.json`
+- `wwwroot/`
 - `Scripts/install-service.cmd`
 - `Scripts/install-service.ps1`
 - `Scripts/uninstall-service.cmd`
@@ -1127,7 +1271,7 @@ tests/
 
 ## 12. README 要求
 
-仓库需补充并维护 `README.md`，至少说明：
+仓库维护 `README.md`，至少说明：
 
 1. 项目用途
 2. 运行环境
@@ -1174,12 +1318,12 @@ tests/
 
 ## 15. 交付清单
 
-当前仓库应保持以下交付物完整可用；其中 `README.md` 当前仍需补齐：
+当前仓库保持以下交付物完整可用：
 
 1. 完整项目代码
 2. 可编译运行
 3. `appsettings.json`
-4. `README.md`（待补齐）
+4. `README.md`（已在仓库中维护）
 5. `Scripts/install-service.cmd`
 6. `Scripts/install-service.ps1`
 7. `Scripts/uninstall-service.cmd`
@@ -1300,18 +1444,18 @@ tests/
 - 集群高可用
 - 绝对意义上的端到端恰好一次
 - 超大规模连接数
-- 完整运营后台
 
-### 20.3 推荐实现策略
-建议优先实现：
+### 20.3 实现策略
 
-- Worker Service 托管
+实际落地方式：
+
+- Worker Service 托管（`Web:Enabled=true` 时由 `WebApplication` 承载同一个 Host）
 - MQTTnet Server 接入
 - 有界 `Channel`
 - 转发消费者
 - 指数退避重试
-- 死信文件目录
-- 优雅停机排空
+- 死信文件目录（临时文件原子落盘 + 按保留天数清理）
+- 优雅停机排空（先封堵客户端新发布，再取消消费者并多轮收敛排空，最后才停 Broker）
 - 结构化日志
 
 这样可以较快得到一个能上线做内部使用的稳定版本。

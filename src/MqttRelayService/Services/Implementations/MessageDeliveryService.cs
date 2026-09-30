@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Options;
+﻿using Microsoft.Extensions.Options;
 using MqttRelayService.Models;
 using MqttRelayService.Options;
 using MqttRelayService.Services.Abstractions;
@@ -160,9 +160,9 @@ namespace MqttRelayService.Services.Implementations
                 runCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 _cts = runCts;
 
-                // 物理池线程数初始仅拉起配置所需的消费者数量（或至少 1 个），以符合启动测试断言
-                // 运行期若在页面调高并发度，将通过 ConcurrencyChanged 事件动态增补物理消费者线程
-                handlerCount = Math.Max(1, _options.MaxConcurrentHandlers);
+                // 物理池线程数初始仅拉起配置所需的消费者数量（或至少 1 个），并按并发硬上限收敛，
+                // 避免配置值大于硬上限时创建出大量只能空转轮询的消费者任务
+                handlerCount = Math.Clamp(_options.MaxConcurrentHandlers, 1, _throughputController.MaxConcurrencyHardLimit);
 
                 for (int i = 0; i < handlerCount; i++)
                 {
@@ -183,7 +183,8 @@ namespace MqttRelayService.Services.Implementations
         }
 
         /// <summary>
-        /// 停止投递服务，先取消消费循环，等待重试调度收敛，再在超时内尽量排空队列中剩余消息
+        /// 停止投递服务。顺序为：封堵客户端新发布入口（Broker 保持运行）→ 取消消费循环 → 等待重试调度收敛 →
+        /// 在超时内多轮排空队列中剩余消息（队列空且消费者全部退出才算排空完成）。
         /// </summary>
         public async Task StopAsync(CancellationToken cancellationToken = default)
         {
@@ -208,6 +209,18 @@ namespace MqttRelayService.Services.Implementations
 
             try
             {
+                // 阶段 0：先封堵客户端新发布入口，Broker 本身保持运行。
+                // 顺序必须是「封堵新发布 → 取消消费者 → 排空」，Broker 只有在排空结束后才由 BrokerWorker 停止，
+                // 否则排空阶段无法再向订阅者注入消息，剩余消息只能烧退避并被转入死信。
+                try
+                {
+                    _brokerHost.StopAcceptingClientPublishes();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "封堵客户端新发布入口失败，继续执行停机排空");
+                }
+
                 // 阶段 1：取消消费循环的 ReadAllAsync，停止接收新消息
                 ctsToCancel?.Cancel();
 
@@ -228,50 +241,54 @@ namespace MqttRelayService.Services.Implementations
                 using var drainCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, drainTimeoutCts.Token);
 
                 var drainedCount = 0;
+                var deadLetteredCount = 0;
+
                 while (!drainCts.Token.IsCancellationRequested)
                 {
-                    ForwardMessage? message;
-                    try
-                    {
-                        message = await _queue.TryDequeueAsync(drainCts.Token);
-                    }
-                    catch (OperationCanceledException) when (drainCts.Token.IsCancellationRequested)
-                    {
-                        break; // drain 超时
-                    }
+                    var round = await DrainQueueRoundAsync(drainCts.Token);
+                    drainedCount += round.Drained;
+                    deadLetteredCount += round.DeadLettered;
 
-                    if (message == null)
+                    if (drainCts.Token.IsCancellationRequested)
                     {
-                        break; // 队列为空，排空完成
-                    }
-
-                    try
-                    {
-                        await ProcessMessageAsync(message, drainCts.Token);
-                        drainedCount++;
-                    }
-                    catch (OperationCanceledException) when (drainCts.Token.IsCancellationRequested)
-                    {
-                        // drain 超时取消，停止排空
-                        _logger.LogWarning("排空阶段因超时取消，已排空 {DrainedCount} 条消息", drainedCount);
                         break;
                     }
-                    catch (Exception ex)
+
+                    var pendingConsumers = SnapshotConsumerTasks();
+                    if (pendingConsumers.Length == 0)
                     {
-                        _logger.LogError(ex, "排空阶段处理消息 {MessageId} 时发生异常",
-                            message.RouteContext.MessageId);
+                        if (round.QueueWasEmpty)
+                        {
+                            // 队列已空且不存在还会回队的消费者，才算真正排空完成
+                            break;
+                        }
+
+                        // 队列非空但消费者都已退出，继续下一轮 drain
+                        continue;
+                    }
+
+                    // 消费者取消时会把在途消息保留回队列，可能发生在本轮 drain 之后。
+                    // 用剩余排空预算等待这些消费者结束，再重新检查队列，避免"刚宣布排空完成就收到回队消息"。
+                    await Task.WhenAny(
+                        Task.WhenAll(pendingConsumers),
+                        Task.Delay(Timeout.InfiniteTimeSpan, drainCts.Token));
+
+                    if (round.QueueWasEmpty && SnapshotConsumerTasks().Length == 0)
+                    {
+                        break;
                     }
                 }
 
                 var remainingCount = _queue.Count;
                 if (remainingCount > 0)
                 {
-                    _logger.LogWarning("投递服务停止，已排空 {DrainedCount} 条消息，剩余 {RemainingCount} 条未处理",
-                        drainedCount, remainingCount);
+                    _logger.LogWarning("投递服务停止，已排空 {DrainedCount} 条消息（其中 {DeadLetteredCount} 条转入死信），剩余 {RemainingCount} 条未处理",
+                        drainedCount, deadLetteredCount, remainingCount);
                 }
                 else
                 {
-                    _logger.LogInformation("投递服务已停止，排空 {DrainedCount} 条消息，剩余 0 条", drainedCount);
+                    _logger.LogInformation("投递服务已停止，排空 {DrainedCount} 条消息（其中 {DeadLetteredCount} 条转入死信），剩余 0 条",
+                        drainedCount, deadLetteredCount);
                 }
             }
             catch (Exception ex)
@@ -295,11 +312,96 @@ namespace MqttRelayService.Services.Implementations
         }
 
         /// <summary>
-        /// 创建停机/异常恢复路径中使用的强制超时 Token，防止队列满载时无限阻塞。
+        /// 创建停机/异常恢复路径中使用的强制超时 Token 源，防止队列满载时无限阻塞。
+        /// 调用方必须 using 释放，避免定时器对象泄漏。
         /// </summary>
-        private static CancellationToken CreateShutdownForceToken()
+        private static CancellationTokenSource CreateShutdownForceTimeoutSource()
         {
-            return new CancellationTokenSource(ShutdownForceTimeoutMs).Token;
+            return new CancellationTokenSource(ShutdownForceTimeoutMs);
+        }
+
+        /// <summary>
+        /// 停机路径入队封装：把调用方取消/强制超时统一视为"本次入队未成功"，交由调用方决定回队还是转死信。
+        /// </summary>
+        private async Task<bool> TryEnqueueOnShutdownAsync(ForwardMessage message, CancellationToken cancellationToken)
+        {
+            try
+            {
+                return await _queue.EnqueueAsync(message, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("停机路径入队超时，消息 {MessageId} 本次未入队", message.RouteContext.MessageId);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 执行一轮排空：非阻塞地取出并处理队列中当前可见的全部消息。
+        /// 返回本轮排空数量、转入死信数量，以及本轮是否读到过空队列。
+        /// </summary>
+        private async Task<(int Drained, int DeadLettered, bool QueueWasEmpty)> DrainQueueRoundAsync(CancellationToken drainToken)
+        {
+            var drained = 0;
+            var deadLettered = 0;
+
+            while (!drainToken.IsCancellationRequested)
+            {
+                ForwardMessage? message;
+                try
+                {
+                    message = await _queue.TryDequeueAsync(drainToken);
+                }
+                catch (OperationCanceledException) when (drainToken.IsCancellationRequested)
+                {
+                    return (drained, deadLettered, false);
+                }
+
+                if (message == null)
+                {
+                    return (drained, deadLettered, true);
+                }
+
+                var statusBeforeHandling = message.Status;
+                try
+                {
+                    await ProcessMessageAsync(message, drainToken);
+
+                    if (message.Status == MessageProcessStatus.DeadLetter
+                        && statusBeforeHandling != MessageProcessStatus.DeadLetter)
+                    {
+                        deadLettered++;
+                    }
+                    else
+                    {
+                        drained++;
+                    }
+                }
+                catch (OperationCanceledException) when (drainToken.IsCancellationRequested)
+                {
+                    _logger.LogWarning("排空阶段因超时取消，已排空 {DrainedCount} 条消息", drained);
+                    return (drained, deadLettered, false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "排空阶段处理消息 {MessageId} 时发生异常",
+                        message.RouteContext.MessageId);
+                }
+            }
+
+            return (drained, deadLettered, false);
+        }
+
+        /// <summary>
+        /// 清理并返回当前仍未完成的消费者任务快照，用于判断是否还有消费者可能把在途消息保留回队列。
+        /// </summary>
+        private Task[] SnapshotConsumerTasks()
+        {
+            lock (_lifecycleLock)
+            {
+                _consumerTasks.RemoveAll(static task => task.IsCompleted);
+                return _consumerTasks.ToArray();
+            }
         }
 
         /// <summary>
@@ -375,7 +477,8 @@ namespace MqttRelayService.Services.Implementations
                     message.RouteContext.MessageId);
             }
 
-            await MoveToDeadLetterAsync(message, "服务停止时无法保留在途消息", CreateShutdownForceToken());
+            using var forceTimeout = CreateShutdownForceTimeoutSource();
+            await MoveToDeadLetterAsync(message, "服务停止时无法保留在途消息", forceTimeout.Token);
         }
 
         /// <summary>
@@ -395,6 +498,7 @@ namespace MqttRelayService.Services.Implementations
                 // 路由阶段
                 message.Status = MessageProcessStatus.Routing;
                 var targets = await _router.RouteAsync(context, cancellationToken);
+                message.RouteTargetSummary = BuildTargetSummary(targets);
 
                 // 转发阶段：向 Topic 单次注入，由 Broker 分发给所有匹配订阅者。
                 // 无论是否匹配到目标订阅者，均统一调用 TryForwardAsync 进行 Broker 注入，以确保完整的指标审计与延迟记录。
@@ -429,6 +533,24 @@ namespace MqttRelayService.Services.Implementations
                 _logger.LogError(ex, "处理消息 {MessageId} 时发生异常", context.MessageId);
                 await HandleFailureAsync(message, ex.Message, cancellationToken);
             }
+        }
+
+        /// <summary>
+        /// 生成路由目标摘要，写入死信记录的“目标 ClientId 或目标规则”字段。
+        /// 转发采用 Topic 注入 + Broker 广播语义，因此这里记录命中的订阅者清单。
+        /// </summary>
+        private static string BuildTargetSummary(IReadOnlyList<ForwardResult> targets)
+        {
+            if (targets.Count == 0)
+            {
+                return "无命中订阅者（按 Topic 注入）";
+            }
+
+            const int maxListed = 5;
+            var listed = string.Join(",", targets.Take(maxListed).Select(static t => t.TargetClientId));
+            return targets.Count > maxListed
+                ? $"命中 {targets.Count} 个订阅者: {listed},..."
+                : $"命中 {targets.Count} 个订阅者: {listed}";
         }
 
         /// <summary>
@@ -595,10 +717,11 @@ namespace MqttRelayService.Services.Implementations
                         message.RouteContext.MessageId);
                     try
                     {
+                        using var deadLetterTimeout = CreateShutdownForceTimeoutSource();
                         await MoveToDeadLetterAsync(
                             message,
                             "重试调度异常：" + reason,
-                            CancellationToken.None);
+                            deadLetterTimeout.Token);
                     }
                     catch (Exception writeEx)
                     {
@@ -613,7 +736,8 @@ namespace MqttRelayService.Services.Implementations
                     "消息 {MessageId} 重试调度超出上限 {MaxPendingRetryTasks}，直接进入死信",
                     message.RouteContext.MessageId,
                     GetMaxPendingRetryTasks());
-                await MoveToDeadLetterAsync(message, "重试调度超出上限：" + reason, CancellationToken.None);
+                using var overflowDeadLetterTimeout = CreateShutdownForceTimeoutSource();
+                await MoveToDeadLetterAsync(message, "重试调度超出上限：" + reason, overflowDeadLetterTimeout.Token);
             }
         }
 
@@ -634,12 +758,14 @@ namespace MqttRelayService.Services.Implementations
 
                 message.RetryCount = retryCountAfterDelay;
 
-                var enqueued = await _queue.EnqueueAsync(message, CreateShutdownForceToken());
+                using var forceTimeout = CreateShutdownForceTimeoutSource();
+                var enqueued = await TryEnqueueOnShutdownAsync(message, forceTimeout.Token);
                 if (!enqueued)
                 {
                     _logger.LogError("消息 {MessageId} 在停止排空阶段重试入队失败，直接进入死信",
                         message.RouteContext.MessageId);
-                    await MoveToDeadLetterAsync(message, "停止排空阶段重试入队失败：" + reason, CreateShutdownForceToken());
+                    using var deadLetterTimeout = CreateShutdownForceTimeoutSource();
+                    await MoveToDeadLetterAsync(message, "停止排空阶段重试入队失败：" + reason, deadLetterTimeout.Token);
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -657,13 +783,15 @@ namespace MqttRelayService.Services.Implementations
         {
             try
             {
-                var preserved = await _queue.EnqueueAsync(message, CreateShutdownForceToken());
+                using var forceTimeout = CreateShutdownForceTimeoutSource();
+                var preserved = await TryEnqueueOnShutdownAsync(message, forceTimeout.Token);
                 if (preserved)
                 {
                     return;
                 }
 
-                await MoveToDeadLetterAsync(message, reason, CreateShutdownForceToken());
+                using var deadLetterTimeout = CreateShutdownForceTimeoutSource();
+                await MoveToDeadLetterAsync(message, reason, deadLetterTimeout.Token);
             }
             catch (Exception ex)
             {
@@ -671,7 +799,8 @@ namespace MqttRelayService.Services.Implementations
                     message.RouteContext.MessageId);
                 try
                 {
-                    await MoveToDeadLetterAsync(message, "服务停止时保留消息异常：" + reason, CreateShutdownForceToken());
+                    using var deadLetterTimeout = CreateShutdownForceTimeoutSource();
+                    await MoveToDeadLetterAsync(message, "服务停止时保留消息异常：" + reason, deadLetterTimeout.Token);
                 }
                 catch (Exception writeEx)
                 {
@@ -819,6 +948,7 @@ namespace MqttRelayService.Services.Implementations
                 MessageId = message.RouteContext.MessageId,
                 Topic = message.RouteContext.Topic,
                 SourceClientId = message.RouteContext.SourceClientId,
+                TargetClientId = message.RouteTargetSummary,
                 PayloadBase64 = MessagePayloadFormatter.ToBase64(message.RouteContext.Payload),
                 FirstReceivedAt = message.CreatedAt,
                 LastFailedAt = DateTime.Now,
@@ -828,11 +958,10 @@ namespace MqttRelayService.Services.Implementations
 
             try
             {
-                await _deadLetterService.WriteAsync(record, cancellationToken);
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
+                // 死信写盘使用独立的强制超时，不继承调用方的截止 token：
+                // 继承停机截止 token 会在写盘中途取消，留下半截 JSON 且消息已出队无法回队。
+                using var writeTimeout = CreateShutdownForceTimeoutSource();
+                await _deadLetterService.WriteAsync(record, writeTimeout.Token);
             }
             catch (Exception ex)
             {
@@ -864,7 +993,8 @@ namespace MqttRelayService.Services.Implementations
                             message.DeadLetterFailureCount,
                             delay.TotalMilliseconds);
 
-                        await Task.Delay(delay, CancellationToken.None);
+                        // 退避等待受生命周期 token 约束：停机时能立即中断，不再让消费者睡满最大退避
+                        await Task.Delay(delay, cancellationToken);
                     }
 
                     var preserved = await _queue.EnqueueAsync(message, CancellationToken.None);

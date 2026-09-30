@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
@@ -13,50 +13,36 @@ namespace MqttRelayService.Tests
     public class ThroughputControllerTests
     {
         [Fact]
+        public async Task WaitAsync_WhenRateLimitWaitCancelled_ShouldRollbackAcquiredConcurrencySlot()
+        {
+            var controller = new ThroughputController();
+            controller.UpdateMaxMessagesPerSecond(1);
+
+            await controller.WaitAsync(CancellationToken.None);
+            Assert.Equal(1, controller.ActiveCount);
+
+            // 第二个消费者先取到并发槽位，再在限速等待中被取消。
+            // 早期实现会把已占用的槽位永久泄漏，单例控制器最终会把整条投递链路堵死。
+            using var secondCts = new CancellationTokenSource();
+            var waiting = controller.WaitAsync(secondCts.Token);
+            secondCts.CancelAfter(50);
+
+            var completed = await Task.WhenAny(waiting, Task.Delay(TimeSpan.FromSeconds(5)));
+            Assert.Same(waiting, completed);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiting);
+
+            Assert.Equal(1, controller.ActiveCount);
+        }
+
+        [Fact]
         public void InitialState_ShouldBeDefaultValues()
         {
             // Arrange & Act
             var controller = new ThroughputController();
 
             // Assert
-            Assert.False(controller.IsPaused);
             Assert.Equal(0, controller.MaxMessagesPerSecond); // 无限制
             Assert.Equal(50, controller.MaxConcurrency);
-            Assert.Equal(0, controller.ActiveCount);
-        }
-
-        [Fact]
-        public async Task PauseAndResume_ShouldBlockAndUnblockConsumers()
-        {
-            // Arrange
-            var controller = new ThroughputController();
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-
-            // Act 1: 暂停控制器
-            controller.Pause();
-            Assert.True(controller.IsPaused);
-
-            var consumerTask = Task.Run(async () =>
-            {
-                await controller.WaitAsync(cts.Token);
-                return true;
-            });
-
-            // 期待消费者在暂停状态下保持阻塞
-            await Task.Delay(100);
-            Assert.False(consumerTask.IsCompleted);
-
-            // Act 2: 恢复控制器
-            controller.Resume();
-            Assert.False(controller.IsPaused);
-
-            // Assert: 恢复后消费者应该瞬间执行完毕
-            var result = await consumerTask;
-            Assert.True(result);
-            Assert.Equal(1, controller.ActiveCount);
-
-            // 清理
-            controller.Release();
             Assert.Equal(0, controller.ActiveCount);
         }
 

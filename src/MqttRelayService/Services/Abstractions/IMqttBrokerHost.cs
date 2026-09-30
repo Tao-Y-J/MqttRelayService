@@ -21,6 +21,13 @@
         Task StopAsync(CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// 封堵客户端新发布入口，但不停止 Broker 本身。
+        /// 停机时先调用本方法阻断新消息进入内部队列，再执行队列排空；
+        /// Broker 需保持运行，排空阶段才能继续向订阅者注入消息。
+        /// </summary>
+        void StopAcceptingClientPublishes();
+
+        /// <summary>
         /// 向指定 Topic 注入应用消息，由 Broker 自动分发给匹配的订阅者
         /// </summary>
         /// <param name="topic">目标主题</param>

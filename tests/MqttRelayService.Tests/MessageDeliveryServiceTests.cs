@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -173,6 +173,100 @@ namespace MqttRelayService.Tests
             // 应触发重试入队
             _queueMock.Verify(q => q.EnqueueAsync(It.IsAny<ForwardMessage>(), It.IsAny<CancellationToken>()), Times.Once);
             Assert.Equal(1, message.RetryCount);
+        }
+
+        [Fact]
+        public async Task ProcessMessageAsync_RetryExhausted_ShouldRecordRoutingTargetSummaryInDeadLetter()
+        {
+            var queue = new InMemoryMessageQueue(
+                Microsoft.Extensions.Options.Options.Create(new ReliabilityOptions
+                {
+                    QueueCapacity = 10,
+                    EnqueueTimeoutMs = 1000,
+                    MaxRetryCount = 3,
+                    RetryBaseDelayMs = 10,
+                    RetryMaxDelayMs = 100,
+                    ForwardTimeoutMs = 5000,
+                    ShutdownDrainTimeoutMs = 2000,
+                    DropWhenQueueFull = false,
+                    MaxConcurrentHandlers = 1
+                }),
+                new Mock<ILogger<InMemoryMessageQueue>>().Object);
+
+            var routerMock = new Mock<IMessageRouter>();
+            var brokerHostMock = new Mock<IMqttBrokerHost>();
+            var deadLetterMock = new Mock<IDeadLetterService>();
+            var retryPolicyMock = new Mock<IRetryPolicyProvider>();
+
+            routerMock.Setup(r => r.RouteAsync(It.IsAny<RouteContext>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<ForwardResult>
+                {
+                    new() { TargetClientId = "client-2", Success = true },
+                    new() { TargetClientId = "client-3", Success = true }
+                });
+            brokerHostMock.Setup(b => b.PublishAsync(It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(false);
+            retryPolicyMock.Setup(rp => rp.GetDelayAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(TimeSpan.FromMilliseconds(10));
+
+            DeadLetterRecord? captured = null;
+            deadLetterMock.Setup(d => d.WriteAsync(It.IsAny<DeadLetterRecord>(), It.IsAny<CancellationToken>()))
+                .Callback<DeadLetterRecord, CancellationToken>((record, _) => captured = record)
+                .Returns(Task.CompletedTask);
+
+            var service = new MessageDeliveryService(
+                queue,
+                routerMock.Object,
+                brokerHostMock.Object,
+                deadLetterMock.Object,
+                retryPolicyMock.Object,
+                Microsoft.Extensions.Options.Options.Create(new ReliabilityOptions
+                {
+                    QueueCapacity = 10,
+                    EnqueueTimeoutMs = 1000,
+                    MaxRetryCount = 3,
+                    RetryBaseDelayMs = 10,
+                    RetryMaxDelayMs = 100,
+                    ForwardTimeoutMs = 5000,
+                    ShutdownDrainTimeoutMs = 2000,
+                    DropWhenQueueFull = false,
+                    MaxConcurrentHandlers = 1
+                }),
+                new Mock<ILogger<MessageDeliveryService>>().Object);
+
+            await service.StartAsync(CancellationToken.None);
+
+            var message = CreateTestMessage();
+            Assert.True(await queue.EnqueueAsync(message, CancellationToken.None));
+
+            Assert.True(SpinWaitUntil(() => message.Status == MessageProcessStatus.DeadLetter, TimeSpan.FromSeconds(5)),
+                "消息应在超过最大重试次数后进入死信");
+
+            await service.StopAsync(CancellationToken.None);
+
+            Assert.NotNull(captured);
+            // 死信必须记录“目标 ClientId 或目标规则”，便于诊断到底发给谁失败
+            Assert.False(string.IsNullOrWhiteSpace(captured!.TargetClientId));
+            Assert.Contains("client-2", captured.TargetClientId!, StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// 轮询等待条件成立，避免依赖固定 sleep 造成的抖动。
+        /// </summary>
+        private static bool SpinWaitUntil(Func<bool> condition, TimeSpan timeout)
+        {
+            var deadline = DateTime.UtcNow + timeout;
+            while (DateTime.UtcNow < deadline)
+            {
+                if (condition())
+                {
+                    return true;
+                }
+
+                Thread.Sleep(20);
+            }
+
+            return condition();
         }
 
         [Fact]
@@ -508,6 +602,10 @@ namespace MqttRelayService.Tests
 
             // 验证消息被处理（状态从 Queued 变为 Succeeded）
             Assert.Equal(MessageProcessStatus.Succeeded, message.Status);
+
+            // 验证排空前置动作：必须先封堵客户端新发布入口，再排空队列
+            Assert.True(recordingBroker.StopAcceptingPublishesCalled,
+                "StopAsync 必须先调用 IMqttBrokerHost.StopAcceptingClientPublishes 封堵新发布入口");
 
             // 验证 drain 阶段调用了 PublishAsync，且 sourceClientId 正确传递
             Assert.True(recordingBroker.PublishCalled, "drain 阶段应调用 PublishAsync 处理消息");
@@ -1235,10 +1333,20 @@ namespace MqttRelayService.Tests
             public string? LastSourceClientId { get; private set; }
             public int PublishCallCount { get; private set; }
 
+            /// <summary>
+            /// 是否已调用停机封堵入口，用于断言停机顺序为先封堵再排空。
+            /// </summary>
+            public bool StopAcceptingPublishesCalled { get; private set; }
+
             public bool IsRunning => true;
 
             public Task StartAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
             public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+            public void StopAcceptingClientPublishes()
+            {
+                StopAcceptingPublishesCalled = true;
+            }
 
             public Task<bool> PublishAsync(string topic, byte[] payload, int qos, string? sourceClientId = null, bool retain = false, CancellationToken cancellationToken = default)
             {

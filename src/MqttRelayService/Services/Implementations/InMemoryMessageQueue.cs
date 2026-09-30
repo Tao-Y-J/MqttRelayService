@@ -89,7 +89,13 @@ namespace MqttRelayService.Services.Implementations
                 _logger.LogDebug("消息 {MessageId} 已入队，当前队列长度 {Count}", message.MessageId, currentCount);
                 return true;
             }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // 调用方主动取消：按标准取消语义向上传播，
+                // 不能被误判为"队列满载丢弃"，否则停机路径会把本该保留的消息写成死信。
+                throw;
+            }
+            catch (OperationCanceledException)
             {
                 // 入队超时
                 _logger.LogWarning("消息 {MessageId} 入队超时（{TimeoutMs}ms），队列可能已满",

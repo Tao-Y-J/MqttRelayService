@@ -5,7 +5,6 @@ title Run MQTT stress test for 60s
 
 set "ROOT=%~dp0"
 set "SCRIPT=%ROOT%stress_mqtt_1883.py"
-set "PYTHON_EXE=C:\Users\admin\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
 
 if not exist "%SCRIPT%" (
     echo [ERROR] Cannot find stress script: %SCRIPT%
@@ -13,15 +12,19 @@ if not exist "%SCRIPT%" (
     exit /b 1
 )
 
-if not exist "%PYTHON_EXE%" (
-    where python >nul 2>&1
-    if %errorlevel% neq 0 (
-        echo [ERROR] Python runtime not found.
-        echo [ERROR] Expected: %PYTHON_EXE%
-        pause
-        exit /b 1
-    )
-    set "PYTHON_EXE=python"
+rem Locate Python from PATH instead of a machine-specific absolute path.
+set "PYTHON_EXE="
+where python >nul 2>&1
+if not errorlevel 1 set "PYTHON_EXE=python"
+if not defined PYTHON_EXE (
+    where py >nul 2>&1
+    if not errorlevel 1 set "PYTHON_EXE=py"
+)
+if not defined PYTHON_EXE (
+    echo [ERROR] Python runtime not found in PATH.
+    echo [HINT] Install Python 3 or add python.exe to PATH, then run again.
+    pause
+    exit /b 1
 )
 
 echo ========================================

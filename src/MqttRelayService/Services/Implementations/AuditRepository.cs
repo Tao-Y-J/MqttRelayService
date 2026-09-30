@@ -22,6 +22,25 @@ namespace MqttRelayService.Services.Implementations
         private const int SqliteWriteBatchSize = 500;
         private const int DefaultExistsQueryBatchSize = 2000;
         private const int DefaultWriteBatchSize = 200;
+
+        /// <summary>
+        /// 单页最大条数。分页参数由仓储层统一收敛，任何调用方都无法请求超大页长。
+        /// </summary>
+        private const int MaxPageSize = 200;
+
+        /// <summary>
+        /// 最大页码，与 MaxPageSize 配合保证 Skip 偏移量不溢出 int。
+        /// </summary>
+        private const int MaxPageNumber = 1000000;
+
+        /// <summary>
+        /// 收敛分页参数：页码不小于 1、页长限制在 [1, MaxPageSize]。
+        /// </summary>
+        private static void NormalizePaging(ref int page, ref int pageSize)
+        {
+            page = Math.Clamp(page, 1, MaxPageNumber);
+            pageSize = Math.Clamp(pageSize, 1, MaxPageSize);
+        }
         private readonly AuditStorageOptions _options;
         private readonly ILogger<AuditRepository> _logger;
         private readonly SemaphoreSlim _writeLock = new(1, 1);
@@ -31,10 +50,6 @@ namespace MqttRelayService.Services.Implementations
         // 双检锁标志位：读路径（GetPagedMessagesAsync 等不持 _writeLock 的查询）也会读取此标志，
         // 必须用 volatile 保证跨线程可见性，否则读线程可能看到陈旧的 false 而重复进入 InitTables。
         private volatile bool _schemaEnsured;
-
-        /// <summary>
-        /// 正在执行清理的历史状态标志，防止多线程清理任务堆积排队造成线程池饥饿。
-        /// </summary>
 
         public AuditRepository(IOptions<AuditStorageOptions> options, ILogger<AuditRepository> logger)
             : this(options.Value, logger)
@@ -128,6 +143,9 @@ namespace MqttRelayService.Services.Implementations
             await Task.CompletedTask;
         }
 
+        /// <summary>
+        /// 初始化数据库表结构，并收敛上次非正常关闭残留的在途状态。
+        /// </summary>
         public async Task InitializeAsync()
         {
             await _writeLock.WaitAsync();
@@ -149,6 +167,8 @@ namespace MqttRelayService.Services.Implementations
                 }
 
                 _logger.LogInformation("审计持久化初始化成功");
+
+                await WarnWhenArchiveThresholdExceededAsync();
             }
             catch (Exception ex)
             {
@@ -158,6 +178,45 @@ namespace MqttRelayService.Services.Implementations
             finally
             {
                 _writeLock.Release();
+            }
+        }
+
+        /// <summary>
+        /// 写入或更新单条消息审计记录。
+        /// </summary>
+        /// <summary>
+        /// 启动时按配置阈值给出历史数据规模提示。
+        /// 审计表不做自动清理与自动删除，超过阈值只提示运维安排数据迁移。
+        /// </summary>
+        private async Task WarnWhenArchiveThresholdExceededAsync()
+        {
+            try
+            {
+                if (_options.MessageArchiveThreshold > 0)
+                {
+                    var messageCount = await _db.Queryable<MessageAuditRecord>().CountAsync();
+                    if (messageCount >= _options.MessageArchiveThreshold)
+                    {
+                        _logger.LogWarning(
+                            "消息审计表已有 {MessageCount} 条记录，达到迁移阈值提示 {Threshold}，请安排历史数据迁移",
+                            messageCount, _options.MessageArchiveThreshold);
+                    }
+                }
+
+                if (_options.ClientHistoryArchiveThreshold > 0)
+                {
+                    var historyCount = await _db.Queryable<ClientConnectionHistoryRecord>().CountAsync();
+                    if (historyCount >= _options.ClientHistoryArchiveThreshold)
+                    {
+                        _logger.LogWarning(
+                            "客户端历史表已有 {HistoryCount} 条记录，达到迁移阈值提示 {Threshold}，请安排历史数据迁移",
+                            historyCount, _options.ClientHistoryArchiveThreshold);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "统计审计数据规模失败，已跳过迁移阈值提示");
             }
         }
 
@@ -181,6 +240,9 @@ namespace MqttRelayService.Services.Implementations
             }
         }
 
+        /// <summary>
+        /// 批量写入或更新消息审计记录。
+        /// </summary>
         public async Task RecordMessageAuditsAsync(IReadOnlyList<MessageAuditRecord> records)
         {
             if (records == null || records.Count == 0) return;
@@ -322,6 +384,9 @@ namespace MqttRelayService.Services.Implementations
             }
         }
 
+        /// <summary>
+        /// 记录一条客户端连接或订阅历史；写入失败只记日志，不向上抛出。
+        /// </summary>
         public async Task RecordClientConnectionHistoryAsync(ClientConnectionHistoryRecord record)
         {
             await _writeLock.WaitAsync();
@@ -341,6 +406,36 @@ namespace MqttRelayService.Services.Implementations
             }
         }
 
+        /// <summary>
+        /// 批量记录客户端连接或订阅历史；写入失败只记日志，由调用方决定是否降级。
+        /// </summary>
+        public async Task RecordClientConnectionHistoriesAsync(IReadOnlyList<ClientConnectionHistoryRecord> records)
+        {
+            if (records == null || records.Count == 0)
+            {
+                return;
+            }
+
+            await _writeLock.WaitAsync();
+            try
+            {
+                await EnsureSchemaAsync();
+                await _db.Insertable(records.ToList()).ExecuteCommandAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "批量写入 {Count} 条客户端历史记录发生异常", records.Count);
+                throw;
+            }
+            finally
+            {
+                _writeLock.Release();
+            }
+        }
+
+        /// <summary>
+        /// 按消息 ID 精确查询单条消息审计记录。
+        /// </summary>
         public async Task<MessageAuditRecord?> GetMessageByIdAsync(string messageId)
         {
             if (string.IsNullOrWhiteSpace(messageId))
@@ -362,6 +457,9 @@ namespace MqttRelayService.Services.Implementations
             }
         }
 
+        /// <summary>
+        /// 分页查询消息审计记录；分页参数在仓储层统一收敛，避免调用方传入超大页长一次性物化全表。
+        /// </summary>
         public async Task<(int TotalCount, IReadOnlyList<MessageAuditRecord> Items)> GetPagedMessagesAsync(
             int page,
             int pageSize,
@@ -372,6 +470,8 @@ namespace MqttRelayService.Services.Implementations
             DateTime? startDate = null,
             DateTime? endDate = null)
         {
+            NormalizePaging(ref page, ref pageSize);
+
             try
             {
                 await EnsureSchemaAsync();
@@ -404,6 +504,9 @@ namespace MqttRelayService.Services.Implementations
             }
         }
 
+        /// <summary>
+        /// 分页查询客户端连接与订阅历史；分页参数同样在仓储层统一收敛。
+        /// </summary>
         public async Task<(int TotalCount, IReadOnlyList<ClientConnectionHistoryRecord> Items)> GetPagedClientHistoryAsync(
             int page,
             int pageSize,
@@ -411,6 +514,8 @@ namespace MqttRelayService.Services.Implementations
             string? eventType = null,
             string? search = null)
         {
+            NormalizePaging(ref page, ref pageSize);
+
             try
             {
                 await EnsureSchemaAsync();
@@ -440,6 +545,9 @@ namespace MqttRelayService.Services.Implementations
             }
         }
 
+        /// <summary>
+        /// 获取 Dashboard 汇总数据（总消息数、各状态计数与最近记录）。
+        /// </summary>
         public async Task<(
             int TotalMessages,
             int TotalPending,
@@ -448,6 +556,8 @@ namespace MqttRelayService.Services.Implementations
             int TotalDeadLetter,
             IReadOnlyList<MessageAuditRecord> RecentItems)> GetDashboardMessageSummaryAsync(int recentCount)
         {
+            recentCount = Math.Clamp(recentCount, 1, MaxPageSize);
+
             try
             {
                 await EnsureSchemaAsync();

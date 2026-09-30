@@ -162,6 +162,89 @@ namespace MqttRelayService.Tests
         }
 
         [Fact]
+        public async Task RouteAsync_WildcardHash_ShouldNotMatchDollarPrefixedTopics()
+        {
+            var sessions = new List<ClientSessionInfo>
+            {
+                new()
+                {
+                    ClientId = "client-2",
+                    Subscriptions = new HashSet<string> { "#" }
+                }
+            };
+
+            _registryMock.Setup(r => r.GetAllSessionsAsync(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(sessions);
+
+            var context = new RouteContext
+            {
+                MessageId = "msg-1",
+                Topic = "$SYS/broker/uptime",
+                SourceClientId = "client-1"
+            };
+
+            // MQTT 规范：以 # 或 + 开头的过滤器不得匹配 $ 开头主题
+            var results = await _router.RouteAsync(context);
+
+            Assert.Empty(results);
+        }
+
+        [Fact]
+        public async Task RouteAsync_WildcardPlus_ShouldNotMatchDollarPrefixedTopics()
+        {
+            var sessions = new List<ClientSessionInfo>
+            {
+                new()
+                {
+                    ClientId = "client-2",
+                    Subscriptions = new HashSet<string> { "+/broker/uptime" }
+                }
+            };
+
+            _registryMock.Setup(r => r.GetAllSessionsAsync(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(sessions);
+
+            var context = new RouteContext
+            {
+                MessageId = "msg-1",
+                Topic = "$SYS/broker/uptime",
+                SourceClientId = "client-1"
+            };
+
+            var results = await _router.RouteAsync(context);
+
+            Assert.Empty(results);
+        }
+
+        [Fact]
+        public async Task RouteAsync_HashWildcardOutsideLastLevel_ShouldNotMatch()
+        {
+            var sessions = new List<ClientSessionInfo>
+            {
+                new()
+                {
+                    ClientId = "client-2",
+                    Subscriptions = new HashSet<string> { "test/#/sub" }
+                }
+            };
+
+            _registryMock.Setup(r => r.GetAllSessionsAsync(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(sessions);
+
+            var context = new RouteContext
+            {
+                MessageId = "msg-1",
+                Topic = "test/anything/sub",
+                SourceClientId = "client-1"
+            };
+
+            // # 只能作为过滤器末级，非末级不再过度匹配
+            var results = await _router.RouteAsync(context);
+
+            Assert.Empty(results);
+        }
+
+        [Fact]
         public async Task RouteAsync_WhenRegistryThrows_PropagatesException()
         {
             _registryMock.Setup(r => r.GetAllSessionsAsync(It.IsAny<CancellationToken>()))

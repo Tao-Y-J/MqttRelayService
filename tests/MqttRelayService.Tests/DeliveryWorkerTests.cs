@@ -1,4 +1,5 @@
-﻿using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Moq;
 using MqttRelayService.Services.Abstractions;
 using MqttRelayService.Workers;
@@ -12,13 +13,15 @@ namespace MqttRelayService.Tests
     public class DeliveryWorkerTests
     {
         private readonly Mock<IMessageDeliveryService> _deliveryServiceMock;
+        private readonly Mock<IHostApplicationLifetime> _lifetimeMock;
         private readonly DeliveryWorker _worker;
 
         public DeliveryWorkerTests()
         {
             _deliveryServiceMock = new Mock<IMessageDeliveryService>();
+            _lifetimeMock = new Mock<IHostApplicationLifetime>();
             var loggerMock = new Mock<ILogger<DeliveryWorker>>();
-            _worker = new DeliveryWorker(_deliveryServiceMock.Object, loggerMock.Object);
+            _worker = new DeliveryWorker(_deliveryServiceMock.Object, _lifetimeMock.Object, loggerMock.Object);
         }
 
         [Fact]
@@ -43,6 +46,7 @@ namespace MqttRelayService.Tests
             }
 
             _deliveryServiceMock.Verify(d => d.StartAsync(It.IsAny<CancellationToken>()), Times.Once);
+            _lifetimeMock.Verify(l => l.StopApplication(), Times.Never);
         }
 
         [Fact]
@@ -57,14 +61,16 @@ namespace MqttRelayService.Tests
         }
 
         [Fact]
-        public async Task StartAsync_WhenDeliveryServiceStartFails_PropagatesException()
+        public async Task ExecuteAsync_WhenDeliveryServiceStartFails_RequestsHostStop()
         {
             _deliveryServiceMock.Setup(d => d.StartAsync(It.IsAny<CancellationToken>()))
                 .ThrowsAsync(new InvalidOperationException("startup blocked"));
 
-            var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => _worker.StartAsync(CancellationToken.None));
+            // 后台入口必须自行兜底：Host 配置了 BackgroundServiceExceptionBehavior.Ignore，
+            // 若不主动请求停止，进程会带着「Broker 继续接收消息、消费者已死」的状态假存活。
+            await _worker.StartAsync(CancellationToken.None);
 
-            Assert.Equal("startup blocked", exception.Message);
+            _lifetimeMock.Verify(l => l.StopApplication(), Times.Once);
         }
     }
 }

@@ -205,16 +205,18 @@ try {
             # 先删除已有规则，防止重复创建或端口改变
             Remove-NetFirewallRule -Name $rule.Name -ErrorAction SilentlyContinue | Out-Null
             
-            # 创建新规则
+            # 创建新规则：入站范围限制为本机所在子网，
+            # 避免管理面板与 MQTT 端口默认对整个互连网络开放
             New-NetFirewallRule -Name $rule.Name `
                 -DisplayName $rule.DisplayName `
-                -Description "允许外部访问 ${displayName} 的服务端口 (由安装脚本自动配置)" `
+                -Description "允许本地子网访问 ${displayName} 的服务端口 (由安装脚本自动配置)" `
                 -Direction Inbound `
                 -Action Allow `
                 -Protocol TCP `
                 -LocalPort $rule.Port `
+                -RemoteAddress LocalSubnet `
                 -ErrorAction Stop | Out-Null
-            Write-Host "         - 成功发布端口 $($rule.Port) ($($rule.DisplayName))"
+            Write-Host "         - 成功发布端口 $($rule.Port) ($($rule.DisplayName)，作用域: 本地子网)"
         }
     }
     Write-Host "[成功] 防火墙入站端口发布完成。" -ForegroundColor Green

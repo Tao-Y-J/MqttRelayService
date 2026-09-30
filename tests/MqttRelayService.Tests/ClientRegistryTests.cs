@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using Moq;
 using MqttRelayService.Models;
 using MqttRelayService.Options;
@@ -83,6 +83,30 @@ namespace MqttRelayService.Tests
             Assert.NotNull(result);
             Assert.Equal("conn-new", result!.ConnectionId);
             Assert.Equal(ConnectionStatus.Connected, result.Status);
+        }
+
+        [Fact]
+        public async Task UnregisterAsync_MissingConnectionId_DoesNotRemoveSession()
+        {
+            var session = new ClientSessionInfo
+            {
+                ClientId = "client-no-conn",
+                ConnectionId = "conn-1",
+                Username = "user",
+                ConnectedAt = DateTime.Now,
+                LastActivityAt = DateTime.Now,
+                Status = ConnectionStatus.Connected
+            };
+
+            await _registry.RegisterAsync(session);
+
+            // 无连接标识的断开事件无法归属到具体连接，绝不能删除当前会话
+            await _registry.UnregisterAsync("client-no-conn", connectionId: null);
+
+            Assert.Equal(1, _registry.Count);
+            var current = await _registry.GetSessionAsync("client-no-conn");
+            Assert.NotNull(current);
+            Assert.Equal("conn-1", current!.ConnectionId);
         }
 
         [Fact]

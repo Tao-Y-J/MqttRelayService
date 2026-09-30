@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using MqttRelayService.Models;
@@ -29,6 +29,11 @@ namespace MqttRelayService.Services.Abstractions
         /// 记录一条客户端连接或订阅历史。
         /// </summary>
         Task RecordClientConnectionHistoryAsync(ClientConnectionHistoryRecord record);
+
+        /// <summary>
+        /// 批量记录客户端连接或订阅历史。
+        /// </summary>
+        Task RecordClientConnectionHistoriesAsync(IReadOnlyList<ClientConnectionHistoryRecord> records);
 
         /// <summary>
         /// 按消息 ID 精确获取单条消息审计记录。
@@ -68,9 +73,5 @@ namespace MqttRelayService.Services.Abstractions
             int TotalFailed,
             int TotalDeadLetter,
             IReadOnlyList<MessageAuditRecord> RecentItems)> GetDashboardMessageSummaryAsync(int recentCount);
-
-        /// <summary>
-        /// 清理历史数据，保持表规模可控。
-        /// </summary>
     }
 }

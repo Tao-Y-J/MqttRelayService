@@ -55,8 +55,16 @@ namespace MqttRelayService.Services.Implementations
                         return Task.CompletedTask;
                     }
 
-                    if (!string.IsNullOrEmpty(connectionId)
-                        && !string.Equals(session.ConnectionId, connectionId, StringComparison.Ordinal))
+                    if (string.IsNullOrEmpty(connectionId))
+                    {
+                        // 无法归属到具体连接的断开事件不允许删除会话：
+                        // 否则同 ClientId 重连时，旧连接的延迟断开事件会把新连接误删。
+                        _logger.LogWarning("忽略客户端 {ClientId} 的无连接标识断开事件，当前连接 {CurrentConnectionId} 保持在线",
+                            clientId, session.ConnectionId);
+                        return Task.CompletedTask;
+                    }
+
+                    if (!string.Equals(session.ConnectionId, connectionId, StringComparison.Ordinal))
                     {
                         _logger.LogWarning("忽略客户端 {ClientId} 的过期断开事件，事件连接 {EventConnectionId}，当前连接 {CurrentConnectionId}",
                             clientId, connectionId, session.ConnectionId);
@@ -147,18 +155,31 @@ namespace MqttRelayService.Services.Implementations
         /// </summary>
         public Task UpdateActivityAsync(string clientId, CancellationToken cancellationToken = default)
         {
-            while (_sessions.TryGetValue(clientId, out var session))
+            if (string.IsNullOrEmpty(clientId))
             {
-                lock (session)
-                {
-                    if (!_sessions.TryGetValue(clientId, out var current) || current != session)
-                    {
-                        continue;
-                    }
+                return Task.CompletedTask;
+            }
 
-                    session.LastActivityAt = DateTime.Now;
+            try
+            {
+                while (_sessions.TryGetValue(clientId, out var session))
+                {
+                    lock (session)
+                    {
+                        if (!_sessions.TryGetValue(clientId, out var current) || current != session)
+                        {
+                            continue;
+                        }
+
+                        session.LastActivityAt = DateTime.Now;
+                    }
+                    break;
                 }
-                break;
+            }
+            catch (Exception ex)
+            {
+                // 活动时间属于纯记账操作，绝不能因为记账异常导致发布消息被丢弃。
+                _logger.LogError(ex, "更新客户端 {ClientId} 活动时间时发生异常", clientId);
             }
 
             return Task.CompletedTask;

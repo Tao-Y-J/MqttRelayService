@@ -57,6 +57,12 @@
         public string DeadLetterPath { get; set; } = "data/deadletter";
 
         /// <summary>
+        /// 死信日期目录保留天数，超过该天数的目录会在写入死信时清理。
+        /// 配置为 0 或负数表示不清理，需由运维手工维护。
+        /// </summary>
+        public int DeadLetterRetentionDays { get; set; } = 30;
+
+        /// <summary>
         /// 单次转发超时（毫秒）
         /// </summary>
         public int ForwardTimeoutMs { get; set; } = 5000;

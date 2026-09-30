@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using SqlSugar;
 
 namespace MqttRelayService.Models
@@ -49,6 +49,7 @@ namespace MqttRelayService.Models
         /// <summary>
         /// 当前处理状态。
         /// </summary>
+        [SugarColumn(IndexGroupNameList = new string[] { "idx_status" })]
         public string Status { get; set; } = string.Empty;
 
         /// <summary>
@@ -75,6 +76,7 @@ namespace MqttRelayService.Models
         /// <summary>
         /// 最后更新时间。
         /// </summary>
+        [SugarColumn(IndexGroupNameList = new string[] { "idx_updated_at" })]
         public DateTime UpdatedAt { get; set; }
 
         /// <summary>

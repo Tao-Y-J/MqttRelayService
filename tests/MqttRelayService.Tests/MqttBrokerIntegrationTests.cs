@@ -490,6 +490,89 @@ namespace MqttRelayService.Tests
         }
 
         /// <summary>
+        /// 停机封堵入口后：客户端新发布不得进入内部队列，但服务端注入仍必须送达订阅者。
+        /// 这是停机排空能够真正投递消息的前提（Broker 保持运行，仅封堵客户端入口）。
+        /// </summary>
+        [Fact]
+        public async Task StopAcceptingClientPublishes_BlocksClientPublish_ButRelayInjectionStillDelivered()
+        {
+            var (broker, queue, registry, delivery, port) = CreateServices(echoToSender: false);
+
+            try
+            {
+                await broker.StartAsync();
+                await delivery.StartAsync();
+
+                var factory = new MqttClientFactory();
+                var subscriber = factory.CreateMqttClient();
+                var publisher = factory.CreateMqttClient();
+                var received = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+                subscriber.ApplicationMessageReceivedAsync += e =>
+                {
+                    received.TrySetResult(e.ApplicationMessage.ConvertPayloadToString());
+                    return Task.CompletedTask;
+                };
+
+                try
+                {
+                    await subscriber.ConnectAsync(new MqttClientOptionsBuilder()
+                        .WithTcpServer("127.0.0.1", port)
+                        .WithClientId("shutdown-subscriber")
+                        .WithProtocolVersion(MqttProtocolVersion.V500)
+                        .Build());
+
+                    await publisher.ConnectAsync(new MqttClientOptionsBuilder()
+                        .WithTcpServer("127.0.0.1", port)
+                        .WithClientId("shutdown-publisher")
+                        .WithProtocolVersion(MqttProtocolVersion.V500)
+                        .Build());
+
+                    await subscriber.SubscribeAsync(new MqttClientSubscribeOptionsBuilder()
+                        .WithTopicFilter("shutdown/topic")
+                        .Build());
+
+                    // 进入停机阶段：封堵客户端新发布入口
+                    broker.StopAcceptingClientPublishes();
+
+                    await publisher.PublishAsync(new MqttApplicationMessageBuilder()
+                        .WithTopic("shutdown/topic")
+                        .WithPayload(Encoding.UTF8.GetBytes("client-publish-during-shutdown"))
+                        .Build());
+
+                    await Task.Delay(300);
+                    Assert.Equal(0, queue.Count);
+
+                    // 排空阶段仍必须能向订阅者注入消息
+                    var injected = await broker.PublishAsync(
+                        "shutdown/topic",
+                        Encoding.UTF8.GetBytes("relay-injection"),
+                        qos: 1,
+                        sourceClientId: "shutdown-publisher");
+
+                    Assert.True(injected);
+
+                    var completed = await Task.WhenAny(received.Task, Task.Delay(TimeSpan.FromSeconds(5)));
+                    Assert.Same(received.Task, completed);
+                    Assert.Equal("relay-injection", await received.Task);
+                }
+                finally
+                {
+                    await subscriber.DisconnectAsync();
+                    subscriber.Dispose();
+                    await publisher.DisconnectAsync();
+                    publisher.Dispose();
+                }
+            }
+            finally
+            {
+                await delivery.StopAsync();
+                await broker.StopAsync();
+                broker.Dispose();
+            }
+        }
+
+        /// <summary>
         /// 客户端伪造内部转发标记时，仍应进入内部队列，不能绕过发布拦截路径
         /// </summary>
         [Fact]

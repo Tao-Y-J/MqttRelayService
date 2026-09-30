@@ -14,13 +14,16 @@ MqttRelayService 是一个轻量级单机 MQTT Broker，用于在局域网或单
 - 超过重试次数进入死信（JSON 文件记录）
 - 优雅停机时尽量排空队列中剩余消息
 - 可选阻止消息回发给发送方自身（`EchoToSender=false`）
+- 统一 Web 管理面（默认端口 `5000`，Dashboard 页面与 JSON API 共用同一个 Kestrel 监听）
+- 消息审计与客户端连接/订阅历史持久化（SqlSugar ORM，默认 SQLite）
+- 运行期吞吐量调控（每秒转发量与并发度可在线调整，并发度受硬上限约束）
 
 ## 运行环境
 
 - **操作系统**：Windows 10/11、Windows Server 2019/2022
 - **运行时**：.NET 8 SDK（[下载](https://dotnet.microsoft.com/download/dotnet/8.0)）
 - **目标平台**：`win-x64`
-- **默认端口**：`1883`
+- **默认端口**：MQTT Broker `1883`；Web 管理面 `5000`（`Web:Enabled=true` 时服务同时监听 `1883` 与 `5000`）
 
 ## 本地调试
 
@@ -30,7 +33,7 @@ MqttRelayService 是一个轻量级单机 MQTT Broker，用于在局域网或单
 dotnet run --project src/MqttRelayService/MqttRelayService.csproj
 ```
 
-服务启动后会输出日志到控制台，并监听 `1883` 端口。按 `Ctrl+C` 可触发优雅停机。
+服务启动后会输出日志到控制台，并监听 `1883`（MQTT）与 `5000`（Web 管理面）端口。按 `Ctrl+C` 可触发优雅停机。浏览器访问 `http://127.0.0.1:5000/` 打开 Web 管理面。
 
 ## 发布方式
 
@@ -80,59 +83,67 @@ Scripts\uninstall-service.cmd
 
 ```json
 {
-  "Service": {
-    "Name": "MqttRelayService"
-  },
-  "Mqtt": {
-    "TcpPort": 1883,
-    "DefaultQos": 1
-  },
-  "Auth": {
-    "AllowAnonymous": true,
-    "Users": [
-      {
-        "Username": "app1",
-        "Password": "123456",
-        "ClientIdPrefix": "app1"
-      }
-    ]
-  },
-  "Routing": {
-    "EchoToSender": false
-  },
-  "Reliability": {
-    "DeliverySemantics": "AtLeastOnce",
-    "QueueCapacity": 1000,
-    "EnqueueTimeoutMs": 2000,
-    "MaxConcurrentHandlers": 1,
-    "MaxRetryCount": 3,
-    "MaxPendingRetryTasks": 1000,
-    "RetryBaseDelayMs": 1000,
-    "RetryMaxDelayMs": 30000,
-    "EnableDeadLetter": true,
-    "DeadLetterPath": "data/deadletter",
-    "ForwardTimeoutMs": 5000,
-    "ShutdownDrainTimeoutMs": 30000,
-    "DropWhenQueueFull": false
-  },
-  "AuditStorage": {
-    "Provider": "Sqlite",
-    "ConnectionString": "Data Source=data/audit.db",
-    "AutoInitializeSchema": true,
-    "MessageArchiveThreshold": 5000000,
-    "ClientHistoryArchiveThreshold": 1000000
-  },
-  "Web": {
-    "Enabled": true,
-    "Port": 5000
-  },
-  "Serilog": {
-    "FileNamePrefix": "relay",
-    "RetentionDays": 30,
-    "MinimumLevel": {
-      "Default": "Information"
+    "Service": {
+        "Name": "MqttRelayService"
+    },
+    "Mqtt": {
+        "TcpPort": 1883,
+        "DefaultQos": 1
+    },
+    "Auth": {
+        "AllowAnonymous": true,
+        "Users": [
+            {
+                "Username": "app1",
+                "Password": "123456",
+                "ClientIdPrefix": "app1"
+            }
+        ]
+    },
+    "Routing": {
+        "EchoToSender": false
+    },
+    "Reliability": {
+        "DeliverySemantics": "AtLeastOnce",
+        "QueueCapacity": 10000,
+        "EnqueueTimeoutMs": 5000,
+        "MaxConcurrentHandlers": 3,
+        "MaxRetryCount": 3,
+        "MaxPendingRetryTasks": 1000,
+        "RetryBaseDelayMs": 1000,
+        "RetryMaxDelayMs": 30000,
+        "EnableDeadLetter": true,
+        "DeadLetterPath": "data/deadletter",
+        "DeadLetterRetentionDays": 30,
+        "ForwardTimeoutMs": 5000,
+        "ShutdownDrainTimeoutMs": 30000,
+        "DropWhenQueueFull": false,
+        "MaxConcurrencyHardLimit": 200
+    },
+    "Web": {
+        "Enabled": true,
+        "Port": 5000,
+        "ApiKey": null
+    },
+    "AuditStorage": {
+        "Provider": "Sqlite",
+        "ConnectionString": "Data Source=data/audit.db",
+        "AutoInitializeSchema": true,
+        "MessageArchiveThreshold": 5000000,
+        "ClientHistoryArchiveThreshold": 1000000
+    },
+    "Serilog": {
+        "FileNamePrefix": "relay",
+        "RetentionDays": 30,
+        "IncludeCallerInfo": false,
+        "MinimumLevel": {
+            "Default": "Information",
+            "Override": {
+                "Microsoft": "Warning",
+                "Microsoft.Hosting.Lifetime": "Information"
+            }
+        }
     }
-  }
 }
 ```
 
@@ -140,37 +151,65 @@ Scripts\uninstall-service.cmd
 
 | 配置节 | 键 | 说明 |
 |--------|-----|------|
-| **Service** | `Name` | Windows Service 名称 |
-| **Mqtt** | `TcpPort` | Broker 监听端口 |
-| **Mqtt** | `DefaultQos` | 默认 QoS 等级 |
+| **Service** | `Name` | Windows Service 名称，同时作为日志中的 `ServiceName` 字段 |
+| **Mqtt** | `TcpPort` | Broker 监听端口，启动时校验取值范围 `1-65535` |
+| **Mqtt** | `DefaultQos` | 默认 QoS 等级；注入消息的 QoS 越界时回退到该值 |
 | **Auth** | `AllowAnonymous` | 是否允许匿名连接 |
 | **Auth** | `Users` | 预设用户名/密码/ClientId 前缀列表 |
-| **Routing** | `EchoToSender` | `true` 时发送方会收到自己发布的消息；`false` 时不会 |
-| **Reliability** | `QueueCapacity` | 内部转发队列容量上限 |
-| **Reliability** | `MaxConcurrentHandlers` | 后台消费并发数（最小值为 1） |
+| **Routing** | `EchoToSender` | `true` 时发送方会收到自己发布的消息；`false` 时出站拦截器阻止回发给发送方 |
+| **Reliability** | `DeliverySemantics` | 投递语义，当前只接受 `AtLeastOnce`，配置为其它值会在启动时失败 |
+| **Reliability** | `QueueCapacity` | 内部转发队列容量上限，启动时校验必须大于等于 `1` |
+| **Reliability** | `EnqueueTimeoutMs` | 入队等待超时（毫秒），超时按“本次入队未成功”处理并记录 Warning |
+| **Reliability** | `MaxConcurrentHandlers` | 后台消费者初始数量（最小值为 1），并会被 `MaxConcurrencyHardLimit` 收敛 |
 | **Reliability** | `MaxRetryCount` | 单条消息最大重试次数 |
-| **Reliability** | `MaxPendingRetryTasks` | 运行期等待退避的后台重试调度任务上限，建议不大于 `QueueCapacity`，超限消息进入死信 |
-| **Reliability** | `RetryBaseDelayMs` | 重试退避基础延迟（毫秒） |
-| **Reliability** | `RetryMaxDelayMs` | 单次重试退避最大延迟（毫秒） |
-| **Reliability** | `ShutdownDrainTimeoutMs` | 停机时队列排空超时（毫秒） |
-| **Reliability** | `EnableDeadLetter` | 是否启用死信记录 |
-| **Reliability** | `DeadLetterPath` | 死信文件存储目录 |
+| **Reliability** | `MaxPendingRetryTasks` | 运行期等待退避的后台重试调度任务上限，建议不大于 `QueueCapacity`，超限消息直接进入死信；配置小于 1 时回退到 `QueueCapacity` |
+| **Reliability** | `RetryBaseDelayMs` | 重试退避基础延迟（毫秒），必须大于 0 |
+| **Reliability** | `RetryMaxDelayMs` | 单次重试退避最大延迟（毫秒），不得小于 `RetryBaseDelayMs` |
+| **Reliability** | `EnableDeadLetter` | 是否启用死信记录；配置为 `false` 时无法转死信的消息被直接丢弃并记录 Error 日志 |
+| **Reliability** | `DeadLetterPath` | 死信文件存储目录，相对路径以程序基目录 `AppContext.BaseDirectory` 为基准，按 `yyyyMMdd` 子目录分日存放 |
+| **Reliability** | `DeadLetterRetentionDays` | 死信日期目录保留天数，写入死信时清理更早的日期目录；配置为 0 或负数表示不清理 |
+| **Reliability** | `ForwardTimeoutMs` | 单次向 Broker 注入消息的超时（毫秒），必须大于 0 |
+| **Reliability** | `ShutdownDrainTimeoutMs` | 停机排空总超时（毫秒），必须大于 0；Host 的 `ShutdownTimeout` 取该值加 5000ms |
+| **Reliability** | `DropWhenQueueFull` | `true` 时队列满立即丢弃新消息；`false` 时等待 `EnqueueTimeoutMs` |
+| **Reliability** | `MaxConcurrencyHardLimit` | 吞吐调控的并发度硬上限（默认 200），运行期通过 API 调整并发度时不得超过该值 |
 | **AuditStorage** | `Provider` | 审计持久化数据库提供程序，直接填写 `SqlSugar DbType` 名称，例如 `Sqlite`、`SqlServer`、`MySql`、`PostgreSQL`、`Oracle`、`Dm` |
-| **AuditStorage** | `ConnectionString` | 审计持久化数据库连接字符串 |
-| **AuditStorage** | `AutoInitializeSchema` | 是否在启动时自动初始化审计表结构 |
-| **AuditStorage** | `MessageArchiveThreshold` | 消息审计手动迁移阈值提示，不触发自动删除 |
-| **AuditStorage** | `ClientHistoryArchiveThreshold` | 客户端历史手动迁移阈值提示，不触发自动删除 |
-| **Web** | `Enabled` | 是否启用统一 Web 管理面 |
-| **Web** | `Port` | 统一 Web 监听端口，Dashboard 与 API 共用 |
-| **Serilog** | `RetentionDays` | 日志文件保留天数 |
+| **AuditStorage** | `ConnectionString` | 审计持久化数据库连接字符串；SQLite 的相对 `Data Source` 以程序基目录为基准 |
+| **AuditStorage** | `AutoInitializeSchema` | 是否在启动时自动初始化审计表结构；SQLite 数据文件所在目录不存在时会被创建 |
+| **AuditStorage** | `MessageArchiveThreshold` | 启动时按该条数检查消息审计表规模，达到即记录迁移提示日志，不触发自动删除 |
+| **AuditStorage** | `ClientHistoryArchiveThreshold` | 启动时按该条数检查客户端历史表规模，达到即记录迁移提示日志，不触发自动删除 |
+| **Web** | `Enabled` | 是否启用统一 Web 管理面；`false` 时退化为纯 Worker Host，不监听 Web 端口 |
+| **Web** | `Port` | 统一 Web 监听端口，Dashboard 页面与 `/api` 共用同一个 Kestrel 监听（`ListenAnyIP`） |
+| **Web** | `ApiKey` | API 访问密钥；为空时所有 `/api` 端点都不校验鉴权，非空时要求请求头 `X-Api-Key` 与该值完全一致 |
+| **Serilog** | `FileNamePrefix` | 日志文件前缀，滚动文件名为 `{前缀}-yyyyMMddHH.log` |
+| **Serilog** | `RetentionDays` | 日志保留天数，实际按“天数 × 24”换算为保留的小时文件数量上限 |
+| **Serilog** | `IncludeCallerInfo` | 是否启用调用者信息富集（每条日志解析 StackTrace，性能成本较高，默认关闭） |
+| **Serilog** | `MinimumLevel:Default` | 默认最低日志级别，解析失败时回退到 `Information` |
+| **Serilog** | `MinimumLevel:Override` | 按日志源类别前缀覆盖级别，例如 `Microsoft: Warning`、`Microsoft.Hosting.Lifetime: Information` |
 
-停机排空使用 `ShutdownDrainTimeoutMs` 作为总超时。当前默认配置已将 `ShutdownDrainTimeoutMs` 设置为 `30000ms`，与默认 `RetryMaxDelayMs` 一致。停机 drain 阶段遇到失败消息时会同步等待该次退避结束后再尝试重新入队；如果将 `ShutdownDrainTimeoutMs` 调小到 `RetryMaxDelayMs` 以下，排空超时会先触发，消息将按当前逻辑保留回队列或转入死信收敛，不再继续当次下一次注入尝试。
+停机排空使用 `ShutdownDrainTimeoutMs` 作为总超时，Host 的 `ShutdownTimeout` 取该值加 5000ms。当前默认配置为 `30000ms`，与默认 `RetryMaxDelayMs` 一致。停机 drain 阶段遇到失败消息时会同步等待该次退避结束后再尝试重新入队；如果 `ShutdownDrainTimeoutMs` 小于 `RetryMaxDelayMs`，启动时会记录配置提示日志，排空超时会先触发，消息进入“保留回队列或转死信”的收敛分支，不再完成当次下一次注入尝试。
 
-默认使用 SQLite 审计库存储，连接串 `Data Source=data/audit.db` 会被解析到运行目录下的 `data` 目录；如果数据库文件不存在，启动时会自动创建目录、建库并初始化表结构。
+默认使用 SQLite 审计库存储，连接串 `Data Source=data/audit.db` 会被解析到程序基目录下的 `data` 目录；如果数据库文件不存在，启动时会自动创建目录、建库并初始化表结构。
 
-审计数据库当前不会自动清理、截断或归档历史记录。历史数据维护统一通过后期数据库迁移完成；`MessageArchiveThreshold` 与 `ClientHistoryArchiveThreshold` 仅作为人工迁移时的参考阈值提示。
+服务不提供审计表清理能力：审计表与客户端历史表都不会自动清理、截断或归档。`MessageArchiveThreshold` 与 `ClientHistoryArchiveThreshold` 只在启动时统计一次表规模，达到阈值即记录迁移提示日志，要求运维在数据库侧安排历史数据迁移。
+
+审计持久化属于 Web 管理面的可选能力：初始化失败时服务记录 Error 日志并降级为“审计不可用”，实时指标与 MQTT 转发主链路继续运行。
 
 Dashboard 消息审计页里的“延迟 / 处理耗时”表示消息被 Broker 拦截接收后，到服务成功重新注入 Broker 为止的内部处理耗时，不表示发布端到订阅端的端到端网络延迟。
+
+## Web 管理面与 API Key
+
+`Web:Enabled=true`（默认）时，服务同时监听 MQTT 端口 `1883`（MQTTnet TCP 监听）与 Web 端口 `5000`（Kestrel）。Dashboard 页面（`/`、`/index.html`）与 JSON API（`/api/*`）共用 `5000` 这一个 Kestrel 监听，不需要额外的代理或反向代理。
+
+API Key 认证的真实行为：
+
+- 页面**不内嵌**任何密钥。`/` 与 `/index.html` 是无鉴权的静态页面，服务端不再向页面注入 `Web:ApiKey`（早期实现把密钥明文写进未鉴权页面，导致认证形同虚设）。
+- 密钥由运维在页面弹窗中录入，只保存在浏览器 `sessionStorage`；请求返回 `401` 时页面再次弹窗要求录入。
+- 前端在所有 `/api/*` 请求上携带请求头 `X-Api-Key`。
+- `Web:ApiKey` 为空（默认 `null`）时，所有 `/api` 端点都不校验鉴权。
+- `Web:ApiKey` 非空时，`/api` 组内的端点要求 `X-Api-Key` 与该值严格相等（区分大小写），不匹配返回 `401`。
+- `/api/health` 是唯一的例外：它注册在鉴权过滤器之外，无论是否配置 `Web:ApiKey` 都无需密钥即可访问，供监控探活。
+
+Web 管理面的安全边界完全依赖网络可达性与 `Web:ApiKey`：服务本身不提供用户/角色体系、ACL 或 TLS，`/api/health` 始终匿名可访问。生产环境必须把 `5000` 端口限制在受信网络内，并配置非空 `Web:ApiKey`。
 
 ## Topic 规范
 
@@ -194,22 +233,28 @@ Dashboard 消息审计页里的“延迟 / 处理耗时”表示消息被 Broker
 
 当前版本实现以下可靠性保证：
 
-- **至少一次（At-Least-Once）**：消息转发失败后会自动重试，最多 `MaxRetryCount` 次
-- **有界队列**：内部队列有容量上限，满时根据配置选择等待或丢弃
+- **至少一次（At-Least-Once）**：消息转发失败后自动重试，最多 `MaxRetryCount` 次；运行期重试是非阻塞后台调度（`ScheduleRetryEnqueueAsync`），消费者不会被退避延迟占住
+- **有界队列**：内部队列容量上限为 `QueueCapacity`，满时按 `DropWhenQueueFull` 选择立即丢弃或等待 `EnqueueTimeoutMs`
 - **有界重试调度**：运行期等待退避的后台重试调度任务受 `MaxPendingRetryTasks` 限制，超限消息直接进入死信
+- **有界死信目录**：死信按 `yyyyMMdd` 日期目录写入，写入时按 `DeadLetterRetentionDays` 清理更早的日期目录
+- **有界审计待写队列**：审计待写队列上限 50000 条，客户端历史待写队列上限 10000 条；两者超限都丢弃新记录并写入日志，不使用无界队列
 - **异常隔离**：单条消息处理失败不会导致消费者退出或其他消息受影响
-- **优雅停机**：收到停止信号后，先在超时内排空队列中剩余消息再退出
+- **确定性停机顺序**：先封堵客户端新发布入口（`StopAcceptingClientPublishes`，Broker 保持运行）→ 取消消费者 → 多轮排空队列（Broker 仍在运行，排空阶段仍能向订阅者注入消息）→ 排空结束后才由 BrokerWorker 停止 Broker
+
+停机顺序不可颠倒：如果先停 Broker，排空阶段无法再注入消息，剩余消息只能进入死信或丢失。
 
 **当前限制**：
 - 使用**内存队列**（`InMemoryMessageQueue`），进程异常退出或机器宕机时，未完成转发的内存消息会丢失
 - Retained Message 使用 MQTTnet Broker 的运行期内存 retained 语义；服务进程重启后 retained 消息不会恢复
 - 死信记录写入本地 JSON 文件，不依赖外部存储
 - 未实现磁盘队列或消息持久化
-- 停机 drain 是否来得及覆盖一次失败消息的最大退避，取决于 `ShutdownDrainTimeoutMs` 是否不小于 `RetryMaxDelayMs`
+- 只有停机排空阶段会同步等待退避（`DelayAndRequeueDuringStopAsync`）；停机 drain 是否来得及覆盖一次失败消息的最大退避，取决于 `ShutdownDrainTimeoutMs` 是否不小于 `RetryMaxDelayMs`
+- 审计表与客户端历史表不自动清理、不自动归档，历史规模由运维在数据库侧维护
+- `EchoToSender=false` 只对 MQTT 5.0 订阅者生效：出站拦截依赖注入消息携带的 MQTT 5.0 User Properties（`x-source-client-id`），MQTT 3.1.1 协议本身没有 User Properties 字段，因此 MQTT 3.1.1 订阅者仍会收到发送方自己发布的消息
 
 ## 当前不支持的能力
 
-以下能力在当前版本中**未实现**，如后续有需求需单独评估：
+以下能力在当前版本中**未实现**：
 
 - 磁盘队列或消息持久化
 - Retained Message 的磁盘持久化
@@ -217,7 +262,12 @@ Dashboard 消息审计页里的“延迟 / 处理耗时”表示消息被 Broker
 - 连接外部 MQTT Broker（桥接模式）
 - 严格按客户端级别的点对点直投（当前采用 Topic 注入 + 出站拦截实现）
 - 完整的 ACL（访问控制列表），当前仅支持基于预设用户的简单认证
+- 用户/角色体系与细粒度权限控制
+- TLS 加密：MQTT 监听与 Web 管理面都只提供明文 TCP/HTTP
 - MQTT 3.1.1 下的 `EchoToSender=false` 兼容（当前依赖 MQTT 5.0 User Properties）
+- 审计表与客户端历史表的自动清理、截断或归档
+
+**Web 管理面的安全边界完全依赖网络可达性与 `Web:ApiKey`**：没有完整的 ACL、没有 TLS、没有用户/角色体系，`/api/health` 始终匿名可访问，未配置 `Web:ApiKey` 时所有 `/api` 端点都不校验鉴权。
 
 ## 架构概览
 
@@ -253,12 +303,12 @@ Dashboard 消息审计页里的“延迟 / 处理耗时”表示消息被 Broker
 1. 客户端发布消息 → Broker 拦截（`InterceptingPublishAsync`）→ 消息入队
 2. 投递服务消费队列 → 路由匹配（`MessageRouter.RouteAsync`）→ 向 Topic 注入消息
 3. Broker 按订阅分发给所有匹配客户端
-4. 出站拦截器（`InterceptingOutboundPacketAsync`）阻止回发给发送方（`EchoToSender=false` 时）
+4. 出站拦截器（`InterceptingOutboundPacketAsync`）在 `EchoToSender=false` 时阻止回发给发送方（依赖注入消息上的 MQTT 5.0 User Properties，仅对 MQTT 5.0 订阅者生效）
 
 ## 日志
 
 日志默认输出到：
 - **控制台**（运行时可见）
-- **文件**（`logs/` 目录，按小时滚动，`relay-YYYYMMDD-HH.log`）
+- **文件**：程序基目录（`AppContext.BaseDirectory`）下的 `Logs` 目录，按小时滚动，滚动文件名为 `relay-YYYYMMDDHH.log`（前缀由 `Serilog:FileNamePrefix` 决定）
 
-日志级别可通过 `appsettings.json` 中 `Serilog:MinimumLevel` 调整。
+`Serilog:RetentionDays` 按“天数 × 24”换算成保留的小时文件数量上限。`Serilog:IncludeCallerInfo=true` 时日志行额外输出 `{Caller}` 字段（每条日志解析 StackTrace，默认关闭）。日志级别通过 `Serilog:MinimumLevel:Default` 与 `Serilog:MinimumLevel:Override` 调整。
