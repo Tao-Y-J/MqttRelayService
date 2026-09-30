@@ -77,7 +77,9 @@ Scripts\uninstall-service.cmd
 
 ## 配置说明
 
-所有配置通过 `appsettings.json` 管理，发布后该文件与可执行文件位于同一目录，修改后需重启服务生效。
+所有配置通过 `appsettings.json` 管理，发布后该文件与可执行文件位于同一目录，修改后需重启服务生效。该文件内每个配置项都带中文注释，可直接对照注释修改；`appsettings.Development.json` 与它同时加载并逐键覆盖（环境文件由 `DOTNET_ENVIRONMENT` / `ASPNETCORE_ENVIRONMENT` 选择，未设置时只加载 `appsettings.json`）。
+
+配置文件允许 `//` 行注释与 `/* */` 块注释，但**不允许尾随逗号**：安装与卸载脚本用 Windows PowerShell 5.1 的 `ConvertFrom-Json` 读取 `Service:Name`、`Mqtt:TcpPort`、`Web:Port`，该解析器既不支持注释也不支持尾随逗号，脚本会先剥离注释再解析。一旦脚本解析失败，它只打印告警并回退到默认服务名（`MqttRelayService`），不会报错退出，因此改名后请确认安装脚本输出里的服务名称符合预期。
 
 ### 配置项一览
 

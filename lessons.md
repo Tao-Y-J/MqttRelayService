@@ -309,3 +309,17 @@ HostedService 注册顺序必须与停机顺序匹配：Host 按注册逆序停�
 - **做法**：调度上给出两条路径——配置整点时取「今天的该整点，已过则取明天」；未配置整点时按间隔执行，并把间隔的**校验上限**钉在 1440 分钟。这样「超过 24 小时不清理」在配置层面就无法表达，误配会在启动时失败，而不是运行期静默不清理。
 - **配套**：清理任务启动时先清理一轮，用来收敛进程停止期间堆积的超期数据；周期任务必须顶层 `try/catch`（`BackgroundServiceExceptionBehavior.Ignore` 下异常逃逸等于静默停止）。
 - **隔离**：多张表共用一次清理时，每张表独立 `try/catch`。否则一张表持续失败会把另一张表的清理一起饿死，故障表之外的容量目标仍然失效。
+
+## 11. 配置文件注释与脚本解析兼容（2026-10-01）
+
+### 11.1 给 `appsettings.json` 加注释必须同步改安装脚本
+
+- **问题**：.NET 配置提供程序（`Microsoft.Extensions.Configuration.Json`）解析时会跳过 `//` 与 `/* */` 注释，所以 `appsettings.json` 可以直接写注释；但 `Scripts/install-service.ps1`、`Scripts/uninstall-service.ps1` 用 Windows PowerShell 5.1 的 `ConvertFrom-Json` 读取 `Service:Name`、`Mqtt:TcpPort`、`Web:Port`，该解析器遇到注释直接抛错。脚本把异常 `catch` 成一句 Warning 后回退默认值，表现为「改了 `Service:Name` 却按默认名安装」「卸载找不到服务」，而不是脚本失败退出。
+- **做法**：两个脚本各自带一份 `Read-RelayJsonConfig`，解析前先用一次正则剥离注释再交给 `ConvertFrom-Json`。正则 `'(?s)("(?:\\.|[^"\\])*")|(//[^\r\n]*)|(/\*.*?\*/)'` 的字符串字面量分支放在最前且原样保留命中文本，因此 `http://`、路径里的 `//`、转义引号都不会被误删。分两份实现与仓库既有的「安装/卸载脚本自包含」约定一致（`Get-RelayServiceNamesForCurrentDeployment` 也是两份）。
+- **连带约束**：剥离注释后的文本必须仍是**严格 JSON**，尤其不能出现尾随逗号（PS 5.1 的 `ConvertFrom-Json` 同样不接受）。`ConfigurationFileCompatibilityTests.ShippedAppSettings_AfterCommentRemoval_ShouldBeStrictJson` 用默认选项的 `JsonDocument.Parse` 锁住这条契约。
+- **验证手段**：`dotnet test` 覆盖不到 PowerShell 解析，改动脚本后要用仓库实际的分析逻辑跑一遍，例如用 `[System.Management.Automation.Language.Parser]::ParseFile` 取出脚本里的 `Read-RelayJsonConfig` 函数再 `Invoke-Expression`，直接对真实 `appsettings.json` 断言 `Service.Name` / `Mqtt.TcpPort` / `Web.Port`。
+
+### 11.2 JSON 里的 `null` 绑定到 `string` 属性会变成空字符串
+
+- **事实**：`"ApiKey": null` 经配置绑定后 `WebOptions.ApiKey` 是 `""` 而不是 `null`。
+- **做法**：判断「未配置」必须用 `string.IsNullOrEmpty` / `string.IsNullOrWhiteSpace`，不要写 `== null`。`Program` 的 API Key 过滤器用的是 `IsNullOrEmpty`，行为本身正确；写测试时也不要断言 `Assert.Null`。

@@ -54,11 +54,32 @@ function Get-RelayServiceNamesForCurrentDeployment {
     return @($serviceNames)
 }
 
+function Read-RelayJsonConfig {
+    # appsettings.json 允许 // 行注释和 /* */ 块注释，而 Windows PowerShell 5.1 的 ConvertFrom-Json 不支持注释，
+    # 因此解析前先剥离注释。正则的字符串分支优先匹配且原样保留，引号内的 //（例如 http://）不会被误删。
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $raw = Get-Content $Path -Raw
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        throw "配置文件内容为空: $Path"
+    }
+
+    $withoutComment = [regex]::Replace($raw, '(?s)("(?:\\.|[^"\\])*")|(//[^\r\n]*)|(/\*.*?\*/)', {
+        param($match)
+        if ($match.Groups[2].Success -or $match.Groups[3].Success) { '' } else { $match.Value }
+    })
+
+    return $withoutComment | ConvertFrom-Json
+}
+
 # 从 appsettings.json 读取服务名称，失败时回退到默认值
 $serviceName = $defaultServiceName
 if (Test-Path $configPath) {
     try {
-        $config = Get-Content $configPath -Raw | ConvertFrom-Json
+        $config = Read-RelayJsonConfig -Path $configPath
         if ($config.Service -and $config.Service.Name) {
             $serviceName = $config.Service.Name
         }
@@ -88,7 +109,7 @@ $enableWeb = $true
 
 if (Test-Path $configPath) {
     try {
-        $config = Get-Content $configPath -Raw | ConvertFrom-Json
+        $config = Read-RelayJsonConfig -Path $configPath
         Write-Host "[信息] 配置文件: $configPath"
         if ($config.Mqtt -and $config.Mqtt.TcpPort -ne $null) {
             $tcpPort = $config.Mqtt.TcpPort
