@@ -379,7 +379,11 @@ namespace MqttRelayService.Services.Implementations
                 }
                 catch (OperationCanceledException) when (drainToken.IsCancellationRequested)
                 {
-                    _logger.LogWarning("排空阶段因超时取消，已排空 {DrainedCount} 条消息", drained);
+                    // 消息已经被取出：排空预算耗尽时它既不在 _queue.Count 里，也不在任何审计记录里，
+                    // 直接返回会造成静默丢失，因此这里必须把它重新入队（失败则转死信）后再结束本轮排空。
+                    _logger.LogWarning("排空阶段因超时取消，正在保留在途消息 {MessageId}，已排空 {DrainedCount} 条消息",
+                        message.RouteContext.MessageId, drained);
+                    await PreserveInFlightMessageAsync(message);
                     return (drained, deadLettered, false);
                 }
                 catch (Exception ex)

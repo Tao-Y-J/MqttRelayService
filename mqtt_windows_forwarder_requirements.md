@@ -1100,6 +1100,8 @@ tests/
 - 审计持久化初始化失败时降级为"审计不可用"，不拖停 MQTT 转发主链路
 - 启动日志输出 Web 监听端口与 API 认证状态
 - `/api/messages` 与 `/api/clients/history` 统一收敛分页参数（页长上限 200、页码上限 1000000），日期参数解析失败返回 400
+- 审计查询的 `startDate` / `endDate` 按服务器本机时区解释：不带时区的输入按本机时间处理，带 `Z` 或偏移量的输入换算为本机时间后再与审计表的 `CreatedAt` / `UpdatedAt` 列比较
+- `/api` 鉴权过滤器的 `X-Api-Key` 比较使用常量时间实现 `IsApiKeyMatch`（比较 UTF-8 字节，长度不同直接判定不匹配），匹配语义仍是区分大小写的完全相等
 - `/` 与 `/index.html` 不内嵌 API Key，由运维在页面录入并保存在浏览器 `sessionStorage`，响应加 `Cache-Control: no-store`
 
 ---

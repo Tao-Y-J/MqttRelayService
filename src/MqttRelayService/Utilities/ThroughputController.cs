@@ -202,7 +202,9 @@ namespace MqttRelayService.Utilities
 
                 if (concurrencyTask != null)
                 {
-                    await Task.Delay(10, cancellationToken);
+                    // 直接等待并发释放信号：Release() 与并发度变更都会立即完成该信号，
+                    // 既去掉了 10ms 轮询带来的额外投递延迟，也避免空闲消费者反复唤醒空转。
+                    await concurrencyTask.WaitAsync(cancellationToken);
                     continue;
                 }
             }

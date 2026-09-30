@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -1200,6 +1201,220 @@ namespace MqttRelayService.Tests
             var record = await persisted.Task;
             Assert.Equal("Rejected", record.Status);
             Assert.False(string.IsNullOrWhiteSpace(record.ErrorMessage));
+        }
+
+        [Fact]
+        public void MetricsService_WhenPendingAuditQueueIsFull_ShouldLogOverflowWarningOnlyOnce()
+        {
+            using var metricsService = new MetricsService(
+                _queue,
+                _mockClientRegistry.Object,
+                _serviceOptions,
+                _mqttOptions,
+                _reliabilityOptions,
+                _mockAuditRepository.Object,
+                _mockLogger.Object);
+
+            var pending = GetPendingAudits(metricsService);
+            for (int i = 0; i < 50000; i++)
+            {
+                pending.TryAdd(
+                    $"prefill_{i:D5}",
+                    new MessageAuditRecord
+                    {
+                        MessageId = $"prefill_{i:D5}",
+                        Topic = "prefill/topic",
+                        SourceClientId = "prefill_client",
+                        Status = "Queued",
+                        CreatedAt = DateTime.Now,
+                        UpdatedAt = DateTime.Now
+                    });
+            }
+
+            Assert.Equal(50000, pending.Count);
+
+            // 阻止后台 writer 被唤醒，让待写队列稳定停在上限，模拟审计库持续故障的时间窗口
+            SetAuditFlushRequested(metricsService, 1);
+
+            for (int i = 0; i < 5; i++)
+            {
+                var messageId = $"overflow_{i}";
+                metricsService.RecordReceived(new ForwardMessage
+                {
+                    MessageId = messageId,
+                    RouteContext = new RouteContext
+                    {
+                        MessageId = messageId,
+                        Topic = "overflow/topic",
+                        Payload = new byte[] { 1 },
+                        QoS = 1,
+                        SourceClientId = "overflow_client",
+                        Timestamp = DateTime.Now
+                    }
+                });
+            }
+
+            // 故障窗口内新消息持续到达，每条都打一条告警会形成日志风暴，同一故障窗口只能提示一次
+            _mockLogger.Verify(
+                l => l.Log(
+                    LogLevel.Warning,
+                    It.IsAny<EventId>(),
+                    It.Is<It.IsAnyType>((state, _) => state.ToString()!.Contains("审计待写队列已达上限")),
+                    It.IsAny<Exception?>(),
+                    It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+                Times.Once);
+
+            Assert.False(pending.ContainsKey("overflow_0"));
+        }
+
+        [Fact]
+        public async Task MetricsService_Dispose_WhenAuditWriteHangs_ShouldGiveUpAfterBoundedWait()
+        {
+            var writeStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hangingWrite = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            _mockAuditRepository
+                .Setup(r => r.RecordMessageAuditsAsync(It.IsAny<IReadOnlyList<MessageAuditRecord>>()))
+                .Callback<IReadOnlyList<MessageAuditRecord>>(_ => writeStarted.TrySetResult())
+                .Returns(hangingWrite.Task);
+
+            var metricsService = new MetricsService(
+                _queue,
+                _mockClientRegistry.Object,
+                _serviceOptions,
+                _mqttOptions,
+                _reliabilityOptions,
+                _mockAuditRepository.Object,
+                _mockLogger.Object);
+
+            var messageId = "hang_dispose_msg";
+            metricsService.RecordReceived(new ForwardMessage
+            {
+                MessageId = messageId,
+                RouteContext = new RouteContext
+                {
+                    MessageId = messageId,
+                    Topic = "hang/topic",
+                    Payload = new byte[] { 1, 2, 3 },
+                    QoS = 1,
+                    SourceClientId = "hang_client",
+                    Timestamp = DateTime.Now
+                }
+            });
+
+            var started = await Task.WhenAny(writeStarted.Task, Task.Delay(TimeSpan.FromSeconds(5)));
+            Assert.Same(writeStarted.Task, started);
+
+            // Dispose 由 DI 容器在 Host 停机预算之外调用：审计库无响应时必须限时放弃等待，
+            // 否则进程退出会被无限阻塞，与本次修复要解决的停机不可控问题同源。
+            var stopwatch = Stopwatch.StartNew();
+            var disposeTask = Task.Run(metricsService.Dispose);
+            var finished = await Task.WhenAny(disposeTask, Task.Delay(TimeSpan.FromSeconds(15)));
+            stopwatch.Stop();
+
+            Assert.Same(disposeTask, finished);
+            Assert.True(stopwatch.Elapsed >= TimeSpan.FromSeconds(3),
+                $"Dispose 必须真正等待审计 writer 收敛，实际仅 {stopwatch.Elapsed.TotalSeconds:F1}s");
+            Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(15),
+                $"Dispose 必须在限时内返回，实际耗时 {stopwatch.Elapsed.TotalSeconds:F1}s");
+
+            _mockLogger.Verify(
+                l => l.Log(
+                    LogLevel.Warning,
+                    It.IsAny<EventId>(),
+                    It.Is<It.IsAnyType>((state, _) => state.ToString()!.Contains("未在") && state.ToString()!.Contains("停机排空")),
+                    It.IsAny<Exception?>(),
+                    It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+                Times.Once);
+
+            // 放行挂起的写库调用，避免测试结束后残留永不完成的挂起任务
+            hangingWrite.TrySetResult();
+        }
+
+        [Fact]
+        public void MetricsService_CachePayload_SameMessageIdRewrites_ShouldNotEvictLivePayload()
+        {
+            using var metricsService = new MetricsService(
+                _queue,
+                _mockClientRegistry.Object,
+                _serviceOptions,
+                _mqttOptions,
+                _reliabilityOptions,
+                _mockLogger.Object);
+
+            // 同一条消息会在 Received / Forwarded / DeadLetter 各阶段被反复写入缓存。
+            // 早期实现每次都登记一次驱逐键，重复键会挤占驱逐队列，把仍然有效的载荷提前淘汰。
+            for (var i = 0; i < 150; i++)
+            {
+                metricsService.RecordReceived(new ForwardMessage
+                {
+                    MessageId = "hot_msg",
+                    RouteContext = new RouteContext
+                    {
+                        MessageId = "hot_msg",
+                        Topic = "test/hot",
+                        Payload = System.Text.Encoding.UTF8.GetBytes($"payload-{i}"),
+                        QoS = 0,
+                        SourceClientId = "hot_client",
+                        Timestamp = DateTime.Now
+                    }
+                }, isFirstReceipt: false);
+            }
+
+            for (var i = 0; i < 99; i++)
+            {
+                var messageId = $"cold_{i}";
+                metricsService.RecordReceived(new ForwardMessage
+                {
+                    MessageId = messageId,
+                    RouteContext = new RouteContext
+                    {
+                        MessageId = messageId,
+                        Topic = "test/cold",
+                        Payload = System.Text.Encoding.UTF8.GetBytes("x"),
+                        QoS = 0,
+                        SourceClientId = "cold_client",
+                        Timestamp = DateTime.Now
+                    }
+                }, isFirstReceipt: false);
+            }
+
+            // 1 个重复写入键 + 99 个新键恰好等于容量上限，不允许发生任何驱逐
+            Assert.Equal(100, metricsService.CachedPayloadCount);
+            Assert.NotNull(metricsService.GetPayload("hot_msg"));
+        }
+
+        [Fact]
+        public async Task MetricsMessageQueue_WhenMetricsRecordingThrows_ShouldLogErrorInsteadOfSilentSwallow()
+        {
+            var mockMetrics = new Mock<IMetricsService>();
+            var mockQueue = new Mock<IMessageQueue>();
+            var decoratorLogger = new Mock<ILogger<MetricsMessageQueue>>();
+
+            mockMetrics.Setup(m => m.RecordReceived(It.IsAny<ForwardMessage>(), It.IsAny<bool>()))
+                .Throws(new InvalidOperationException("metrics unavailable"));
+            mockQueue.Setup(q => q.EnqueueAsync(It.IsAny<ForwardMessage>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(true);
+
+            var decorator = new MetricsMessageQueue(mockQueue.Object, mockMetrics.Object, decoratorLogger.Object);
+            var message = new ForwardMessage
+            {
+                MessageId = "logged_msg",
+                RouteContext = new RouteContext { MessageId = "logged_msg" },
+                Status = MessageProcessStatus.Received
+            };
+
+            var success = await decorator.EnqueueAsync(message);
+
+            Assert.True(success);
+            decoratorLogger.Verify(
+                l => l.Log(
+                    LogLevel.Error,
+                    It.IsAny<EventId>(),
+                    It.Is<It.IsAnyType>((state, _) => state.ToString()!.Contains("队列指标失败")),
+                    It.IsAny<Exception>(),
+                    It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+                Times.Once);
         }
 
         private static ConcurrentDictionary<string, MessageAuditRecord> GetPendingAudits(MetricsService metricsService)

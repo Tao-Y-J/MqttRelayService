@@ -222,5 +222,49 @@ namespace MqttRelayService.Tests
             Assert.All(elapsed, ms => Assert.True(ms >= 400, $"Elapsed was {ms}ms, expected throughput control to remain effective."));
             Assert.All(elapsed, ms => Assert.True(ms < 3200, $"Elapsed was {ms}ms, expected active concurrency to increase total throughput instead of staying capped by a global 2 MPS bucket."));
         }
+
+        [Fact]
+        public async Task WaitAsync_WhenConcurrencyFull_ShouldResumeAsSoonAsSlotIsReleased()
+        {
+            var controller = new ThroughputController();
+            controller.UpdateMaxConcurrency(1);
+
+            await controller.WaitAsync(CancellationToken.None);
+            Assert.Equal(1, controller.ActiveCount);
+
+            // 并发已满：等待方必须挂在并发释放信号上，Release() 后立即恢复处理，而不是等下一轮轮询
+            var waiter = controller.WaitAsync(CancellationToken.None);
+            await Task.Delay(100);
+            Assert.False(waiter.IsCompleted);
+
+            controller.Release();
+
+            var completed = await Task.WhenAny(waiter, Task.Delay(TimeSpan.FromSeconds(2)));
+            Assert.Same(waiter, completed);
+            await waiter;
+            Assert.Equal(1, controller.ActiveCount);
+
+            controller.Release();
+        }
+
+        [Fact]
+        public async Task WaitAsync_WhenConcurrencyFullAndCancelled_ShouldThrowInsteadOfHanging()
+        {
+            var controller = new ThroughputController();
+            controller.UpdateMaxConcurrency(1);
+            await controller.WaitAsync(CancellationToken.None);
+
+            using var cts = new CancellationTokenSource();
+            var waiter = controller.WaitAsync(cts.Token);
+            await Task.Delay(50);
+            cts.Cancel();
+
+            var completed = await Task.WhenAny(waiter, Task.Delay(TimeSpan.FromSeconds(2)));
+            Assert.Same(waiter, completed);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiter);
+
+            // 等待期间并未占用槽位，取消不应改动占用数
+            Assert.Equal(1, controller.ActiveCount);
+        }
     }
 }

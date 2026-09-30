@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using MqttRelayService.Models;
 using MqttRelayService.Services.Abstractions;
 using MqttRelayService.Utilities;
@@ -16,21 +17,26 @@ namespace MqttRelayService.Services.Implementations.Decorators
     {
         private readonly IMessageQueue _inner;
         private readonly LazyService<IMetricsService> _metrics;
+        private readonly ILogger<MetricsMessageQueue>? _logger;
 
         /// <summary>
         /// 构造消息队列指标拦截装饰器
         /// </summary>
-        public MetricsMessageQueue(IMessageQueue inner, LazyService<IMetricsService> metrics)
+        /// <param name="inner">被装饰的队列</param>
+        /// <param name="metrics">延迟解析的指标服务</param>
+        /// <param name="logger">可选的日志记录器，仅用于记录指标本身的记录失败</param>
+        public MetricsMessageQueue(IMessageQueue inner, LazyService<IMetricsService> metrics, ILogger<MetricsMessageQueue>? logger = null)
         {
             _inner = inner;
             _metrics = metrics;
+            _logger = logger;
         }
 
         /// <summary>
         /// 直接注入指标服务实例的构造重载，供单元测试与不依赖容器的场景使用。
         /// </summary>
-        public MetricsMessageQueue(IMessageQueue inner, IMetricsService metrics)
-            : this(inner, LazyService<IMetricsService>.From(metrics))
+        public MetricsMessageQueue(IMessageQueue inner, IMetricsService metrics, ILogger<MetricsMessageQueue>? logger = null)
+            : this(inner, LazyService<IMetricsService>.From(metrics), logger)
         {
         }
 
@@ -71,7 +77,7 @@ namespace MqttRelayService.Services.Implementations.Decorators
         /// <summary>
         /// 指标记录只允许影响观测结果，绝不能改变被装饰队列的入队结果或向上抛出异常。
         /// </summary>
-        private static void SafeRecord(Action recordAction, string messageId)
+        private void SafeRecord(Action recordAction, string messageId)
         {
             try
             {
@@ -79,7 +85,10 @@ namespace MqttRelayService.Services.Implementations.Decorators
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"记录消息 {messageId} 的队列指标失败: {ex}");
+                if (_logger != null)
+                {
+                    _logger.LogError(ex, "记录消息 {MessageId} 的队列指标失败", messageId);
+                }
             }
         }
 

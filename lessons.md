@@ -206,6 +206,24 @@ HostedService 注册顺序必须与停机顺序匹配：Host 按注册逆序停�
 - 静态 Review 无法发现这类缺陷。任何改动 DI 注册的提交都必须跑 `ServiceRegistrationTests`（按生产注册顺序解析全部关键单例）与 `HostLifecycleTests`（真实 `IHost` 启动 + 真实 MQTT 转发 + 优雅停机）。
 - 排查这类“启动无异常卡死”时，先在真实进程上启动一次并观察日志停在哪一步，比继续读代码更快定位。
 
+### 6.15 同一“上限/故障”判定出现在多条路径时，必须共用同一个去重标志
+
+**问题**：审计待写队列达到上限时，失败批次回填路径用 `_pendingAuditOverflowLogged` 做了告警去重，而正常入队路径对每条新消息都打一条 Warning。审计库长时间故障叠加高吞吐时，日志会被同一条告警刷满，真正的故障信号被淹没。
+
+**做法**：把“达到上限”这一判定视为同一个故障窗口，两条路径共用同一个去重标志；标志只能在条件真正解除（队列排空）后复位。新增同类上限保护时，先搜一遍是否已有同义路径和现成的去重标志。
+
+### 6.16 停机路径上的任何等待都必须有界，包括 Dispose
+
+**问题**：`MetricsService.Dispose` 用 `GetAwaiter().GetResult()` 无界等待审计 writer，而该 writer 退出前还要做最后一轮写库。`Dispose` 由 DI 容器在 `HostOptions.ShutdownTimeout` 之外调用，审计库无响应时进程无法退出——这与“停机排空必须有超时”是同一类问题，只是发生在资源释放阶段。
+
+**做法**：`Dispose` 里的等待统一改成限时 `Task.Wait(ms)`；超时后记录 Warning 并继续释放其余资源。限时等待超时说明 writer 可能仍在运行，此时**不要**释放它还要使用的 `SemaphoreSlim` / `CancellationTokenSource`，否则会把它推进 `ObjectDisposedException`。
+
+### 6.17 有界淘汰队列只在键首次写入时登记
+
+**问题**：`SetBoundedPayload` 对同一 `MessageId` 的每次写入都入队一个驱逐键，而同一条消息在 Received / Forwarded / DeadLetter 阶段会被反复写入。重复键挤占驱逐队列，导致 `while (queue.Count > Max) 淘汰` 把仍在缓存中的载荷提前删掉：写入 150 次热键 + 99 个新键后，缓存只剩 99 条且热键已被驱逐。
+
+**做法**：淘汰队列与缓存字典必须一一对应——先判断键是否已在字典中，只有新键才登记驱逐键；键被淘汰后再次写入会重新登记。仅靠“缓存字典有上限”并不能保证命中率，还要保证驱逐队列不重复计数。
+
 ## 8. 现代 Web 零侵入 Dashboard 与指标拦截经验
 
 对于高可用且对稳定性要求极高（如 Windows Service）的后台服务，构建可视化监控 Dashboard 时必须兼顾“零侵入”与“零故障风险”。

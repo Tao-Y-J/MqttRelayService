@@ -25,6 +25,7 @@ namespace MqttRelayService.Services.Implementations
         private const int AuditFlushBatchSize = 1000;
         private const int MaxPendingAudits = 50000; // 审计待写队列上限，防止 DB 故障时内存无限增长
         private const int MaxPendingClientHistories = 10000; // 客户端历史待写队列上限，MQTT 事件回调只入队不落库
+        private const int AuditWriterShutdownWaitMs = 5000; // Dispose 等待审计 writer 完成停机排空的时限，防止审计库无响应时进程无法退出
         private const int ClientHistoryFlushBatchSize = 200;
         private const int DashboardSummaryCacheTtlMs = 5000; // Dashboard 汇总缓存时间，避免前端轮询打爆无索引统计查询
         private static readonly TimeSpan AuditFlushCoalesceDelay = TimeSpan.FromMilliseconds(50);
@@ -399,9 +400,16 @@ namespace MqttRelayService.Services.Implementations
             // 防止 DB 持续故障时待写队列无限增长；已存在消息允许继续覆盖到最终态
             if (!alreadyPending && _pendingMessageAudits.Count >= MaxPendingAudits)
             {
-                _logger.LogWarning(
-                    "审计待写队列已达上限 {MaxPendingAudits} 条，丢弃消息 {MessageId} 的审计记录",
-                    MaxPendingAudits, record.MessageId);
+                // 与失败批次回填路径共用同一个去重标志：审计库故障期间新消息会持续到达，
+                // 每条都打一条告警会形成日志风暴，因此同一故障窗口只提示一次，
+                // 队列真正排空后由 FlushPendingAuditsAsync 复位该标志。
+                if (Interlocked.Exchange(ref _pendingAuditOverflowLogged, 1) == 0)
+                {
+                    _logger.LogWarning(
+                        "审计待写队列已达上限 {MaxPendingAudits} 条，丢弃消息 {MessageId} 的审计记录",
+                        MaxPendingAudits, record.MessageId);
+                }
+
                 return;
             }
 
@@ -721,7 +729,18 @@ namespace MqttRelayService.Services.Implementations
         /// </summary>
         private void SetBoundedPayload(string messageId, string payloadText)
         {
+            // 同一 MessageId 会在 Received / Forwarded / DeadLetter 各阶段被反复写入，
+            // 只有新键首次进入缓存时才登记驱逐键；否则重复键会挤占驱逐队列，
+            // 把仍然有效的载荷提前淘汰，使缓存命中率远低于 MaxPayloadCount 的设计容量。
+            var isNewKey = !_payloads.ContainsKey(messageId);
+
             _payloads[messageId] = payloadText;
+
+            if (!isNewKey)
+            {
+                return;
+            }
+
             _payloadKeys.Enqueue(messageId);
 
             while (_payloadKeys.Count > MaxPayloadCount)
@@ -1032,99 +1051,99 @@ namespace MqttRelayService.Services.Implementations
                     Subscriptions = s.Subscriptions.ToList()
                 }).ToList();
 
-            // 增量计算吞吐
-            List<object> history;
-            lock (_historyLock)
-            {
-                history = _historySnapshots.ToList();
-            }
-
-            var totalReceived = _dashboardBaselineReceived + Interlocked.Read(ref _totalReceived);
-            var totalSucceeded = _dashboardBaselineSucceeded + Interlocked.Read(ref _totalSucceeded);
-            var totalFailed = _dashboardBaselineFailed + Interlocked.Read(ref _totalFailed);
-            var totalDeadLetter = _dashboardBaselineDeadLetter + Interlocked.Read(ref _totalDeadLetter);
-            var totalPending = _queue.Count;
-            IEnumerable<object> logs = _messageLogs.Values.OrderByDescending(x => x.SystemTimestamp).Cast<object>().ToList();
-
-            if (_auditRepository != null)
-            {
-                var summary = await GetCachedDashboardSummaryAsync(MaxLogCount);
-                totalReceived = Math.Max(0, summary.TotalMessages);
-                totalSucceeded = Math.Max(0, summary.TotalSucceeded);
-                totalFailed = Math.Max(0, summary.TotalFailed);
-                totalDeadLetter = Math.Max(0, summary.TotalDeadLetter);
-                totalPending = Math.Max(0, summary.TotalPending);
-                logs = summary.RecentItems
-                    .OrderByDescending(x => x.CreatedAt)
-                    .Select(x => (object)new MessageLogEntry
-                    {
-                        MessageId = x.MessageId,
-                        Topic = x.Topic,
-                        SourceClientId = x.SourceClientId,
-                        PayloadSize = x.PayloadSize,
-                        Qos = x.Qos,
-                        Retain = x.Retain,
-                        Status = x.Status,
-                        IsSubscriberHit = x.IsSubscriberHit,
-                        LatencyMs = x.LatencyMs,
-                        RetryCount = x.RetryCount,
-                        Timestamp = x.UpdatedAt.ToString("o"),
-                        ErrorMessage = x.ErrorMessage ?? string.Empty,
-                        SystemTimestamp = x.UpdatedAt
-                    })
-                    .ToList();
-            }
-
-            return new
-            {
-                System = new
+                // 增量计算吞吐
+                List<object> history;
+                lock (_historyLock)
                 {
-                    ServiceName = _serviceOptions.Name,
-                    MqttPort = _mqttOptions.TcpPort,
-                    Uptime = uptimeString,
-                    OsVersion = GetFriendlyOsDescription(),
-                    DotNetVersion = RuntimeInformation.FrameworkDescription,
-                    CpuThreads = Environment.ProcessorCount,
-                    MemoryUsageMb = process != null ? Math.Round(process.WorkingSet64 / 1024.0 / 1024.0, 2) : 0,
-                    Timestamp = DateTime.Now.ToString("o")
-                },
-                Counters = new
-                {
-                    TotalReceived = totalReceived,
-                    TotalRejected = Interlocked.Read(ref _totalRejected),
-                    TotalPending = totalPending,
-                    TotalSucceeded = totalSucceeded,
-                    TotalFailed = totalFailed,
-                    TotalDeadLetter = totalDeadLetter,
-                    TotalRetries = Interlocked.Read(ref _totalRetries)
-                },
-                Queue = new
-                {
-                    Current = _queue.Count,
-                    Capacity = _queue.Capacity,
-                    Peak = _queue.PeakCount,
-                    // 容量为 0 时（误配或自定义队列实现）直接按 0 拥挤度返回，避免产生 NaN 污染前端
-                    CongestionPercentage = _queue.Capacity > 0
-                        ? Math.Round((double)_queue.Count / _queue.Capacity * 100, 2)
-                        : 0
-                },
-                Clients = new
-                {
-                    Count = activeSessions.Count,
-                    List = clients
-                },
-                History = history,
-                Logs = logs,
-                Configuration = new
-                {
-                    QueueCapacity = _reliabilityOptions.QueueCapacity,
-                    MaxConcurrentHandlers = _reliabilityOptions.MaxConcurrentHandlers,
-                    MaxRetryCount = _reliabilityOptions.MaxRetryCount,
-                    MaxPendingRetryTasks = _reliabilityOptions.MaxPendingRetryTasks,
-                    EnableDeadLetter = _reliabilityOptions.EnableDeadLetter,
-                    DeadLetterPath = _reliabilityOptions.DeadLetterPath
+                    history = _historySnapshots.ToList();
                 }
-            };
+
+                var totalReceived = _dashboardBaselineReceived + Interlocked.Read(ref _totalReceived);
+                var totalSucceeded = _dashboardBaselineSucceeded + Interlocked.Read(ref _totalSucceeded);
+                var totalFailed = _dashboardBaselineFailed + Interlocked.Read(ref _totalFailed);
+                var totalDeadLetter = _dashboardBaselineDeadLetter + Interlocked.Read(ref _totalDeadLetter);
+                var totalPending = _queue.Count;
+                IEnumerable<object> logs = _messageLogs.Values.OrderByDescending(x => x.SystemTimestamp).Cast<object>().ToList();
+
+                if (_auditRepository != null)
+                {
+                    var summary = await GetCachedDashboardSummaryAsync(MaxLogCount);
+                    totalReceived = Math.Max(0, summary.TotalMessages);
+                    totalSucceeded = Math.Max(0, summary.TotalSucceeded);
+                    totalFailed = Math.Max(0, summary.TotalFailed);
+                    totalDeadLetter = Math.Max(0, summary.TotalDeadLetter);
+                    totalPending = Math.Max(0, summary.TotalPending);
+                    logs = summary.RecentItems
+                        .OrderByDescending(x => x.CreatedAt)
+                        .Select(x => (object)new MessageLogEntry
+                        {
+                            MessageId = x.MessageId,
+                            Topic = x.Topic,
+                            SourceClientId = x.SourceClientId,
+                            PayloadSize = x.PayloadSize,
+                            Qos = x.Qos,
+                            Retain = x.Retain,
+                            Status = x.Status,
+                            IsSubscriberHit = x.IsSubscriberHit,
+                            LatencyMs = x.LatencyMs,
+                            RetryCount = x.RetryCount,
+                            Timestamp = x.UpdatedAt.ToString("o"),
+                            ErrorMessage = x.ErrorMessage ?? string.Empty,
+                            SystemTimestamp = x.UpdatedAt
+                        })
+                        .ToList();
+                }
+
+                return new
+                {
+                    System = new
+                    {
+                        ServiceName = _serviceOptions.Name,
+                        MqttPort = _mqttOptions.TcpPort,
+                        Uptime = uptimeString,
+                        OsVersion = GetFriendlyOsDescription(),
+                        DotNetVersion = RuntimeInformation.FrameworkDescription,
+                        CpuThreads = Environment.ProcessorCount,
+                        MemoryUsageMb = process != null ? Math.Round(process.WorkingSet64 / 1024.0 / 1024.0, 2) : 0,
+                        Timestamp = DateTime.Now.ToString("o")
+                    },
+                    Counters = new
+                    {
+                        TotalReceived = totalReceived,
+                        TotalRejected = Interlocked.Read(ref _totalRejected),
+                        TotalPending = totalPending,
+                        TotalSucceeded = totalSucceeded,
+                        TotalFailed = totalFailed,
+                        TotalDeadLetter = totalDeadLetter,
+                        TotalRetries = Interlocked.Read(ref _totalRetries)
+                    },
+                    Queue = new
+                    {
+                        Current = _queue.Count,
+                        Capacity = _queue.Capacity,
+                        Peak = _queue.PeakCount,
+                        // 容量为 0 时（误配或自定义队列实现）直接按 0 拥挤度返回，避免产生 NaN 污染前端
+                        CongestionPercentage = _queue.Capacity > 0
+                            ? Math.Round((double)_queue.Count / _queue.Capacity * 100, 2)
+                            : 0
+                    },
+                    Clients = new
+                    {
+                        Count = activeSessions.Count,
+                        List = clients
+                    },
+                    History = history,
+                    Logs = logs,
+                    Configuration = new
+                    {
+                        QueueCapacity = _reliabilityOptions.QueueCapacity,
+                        MaxConcurrentHandlers = _reliabilityOptions.MaxConcurrentHandlers,
+                        MaxRetryCount = _reliabilityOptions.MaxRetryCount,
+                        MaxPendingRetryTasks = _reliabilityOptions.MaxPendingRetryTasks,
+                        EnableDeadLetter = _reliabilityOptions.EnableDeadLetter,
+                        DeadLetterPath = _reliabilityOptions.DeadLetterPath
+                    }
+                };
             }
             catch (Exception ex)
             {
@@ -1282,17 +1301,36 @@ namespace MqttRelayService.Services.Implementations
             _auditWriterCts.Cancel();
             SafeReleasePendingAuditSignal();
 
-            try
+            // Dispose 由 DI 容器在 Host 停机预算之外调用，若审计库无响应，
+            // 无界等待会让进程退出被永久阻塞，因此这里限时等待并如实记录结果。
+            var auditWriterStopped = true;
+            var auditWriter = _auditWriterTask;
+            if (auditWriter != null)
             {
-                _auditWriterTask?.GetAwaiter().GetResult();
+                try
+                {
+                    auditWriterStopped = auditWriter.Wait(AuditWriterShutdownWaitMs);
+                    if (!auditWriterStopped)
+                    {
+                        _logger.LogWarning(
+                            "审计后台写入未在 {TimeoutMs}ms 内完成停机排空，放弃等待并继续释放资源",
+                            AuditWriterShutdownWaitMs);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // writer 内部已自行捕获业务异常，此处只兜底 AggregateException 等等待期异常，
+                    // 不允许因为等待失败而跳过后续资源释放。
+                    auditWriterStopped = false;
+                    _logger.LogError(ex, "等待审计后台写入退出时发生异常");
+                }
             }
-            catch (OperationCanceledException)
-            {
-            }
-            finally
+
+            _dashboardSummaryLock.Dispose();
+
+            if (auditWriterStopped)
             {
                 _pendingAuditSignal.Dispose();
-                _dashboardSummaryLock.Dispose();
                 _auditWriterCts.Dispose();
             }
         }

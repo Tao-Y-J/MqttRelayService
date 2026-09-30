@@ -1070,6 +1070,75 @@ namespace MqttRelayService.Tests
             Assert.NotNull(warningLog);
         }
 
+        [Fact]
+        public async Task StopAsync_WhenDrainTimesOutMidMessage_ShouldPreserveInFlightMessage()
+        {
+            var message = CreateTestMessage();
+            var queueMock = new Mock<IMessageQueue>();
+            var routerMock = new Mock<IMessageRouter>();
+            var deadLetterMock = new Mock<IDeadLetterService>();
+            var logMessages = new List<string>();
+            var loggerMock = new Mock<ILogger<MessageDeliveryService>>();
+
+            loggerMock.Setup(x => x.Log(
+                It.IsAny<LogLevel>(),
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((o, t) => true),
+                It.IsAny<Exception?>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()))
+                .Callback(new InvocationAction(i =>
+                {
+                    var formatter = i.Arguments[4] as Delegate;
+                    var msg = formatter?.DynamicInvoke(i.Arguments[2], i.Arguments[3])?.ToString();
+                    if (msg != null) logMessages.Add(msg);
+                }));
+
+            queueMock.Setup(q => q.ReadAllAsync(It.IsAny<CancellationToken>()))
+                .Returns(GetEmptyAsyncEnumerable());
+
+            queueMock.SetupSequence(q => q.TryDequeueAsync(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(message)
+                .ReturnsAsync((ForwardMessage?)null);
+
+            queueMock.Setup(q => q.EnqueueAsync(It.IsAny<ForwardMessage>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(true);
+
+            // 转发一直阻塞到排空预算耗尽：此时消息已经出队，但还没有处理完
+            routerMock.Setup(r => r.RouteAsync(It.IsAny<RouteContext>(), It.IsAny<CancellationToken>()))
+                .Returns(async (RouteContext ctx, CancellationToken ct) =>
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+                    return new List<ForwardResult>();
+                });
+
+            var service = new MessageDeliveryService(
+                queueMock.Object,
+                routerMock.Object,
+                new RecordingBrokerHost(),
+                deadLetterMock.Object,
+                new Mock<IRetryPolicyProvider>().Object,
+                Microsoft.Extensions.Options.Options.Create(new ReliabilityOptions
+                {
+                    QueueCapacity = 10,
+                    MaxRetryCount = 3,
+                    RetryBaseDelayMs = 10,
+                    RetryMaxDelayMs = 100,
+                    ForwardTimeoutMs = 5000,
+                    ShutdownDrainTimeoutMs = 300,
+                    DropWhenQueueFull = false
+                }),
+                loggerMock.Object);
+
+            await service.StartAsync(CancellationToken.None);
+            await service.StopAsync(CancellationToken.None);
+
+            // 排空超时不能把已出队的消息静默丢掉：必须重新入队（回队失败才转死信），
+            // 否则这条消息既不在队列计数里，也不在任何审计记录里。
+            queueMock.Verify(q => q.EnqueueAsync(It.IsAny<ForwardMessage>(), It.IsAny<CancellationToken>()), Times.Once);
+            deadLetterMock.Verify(d => d.WriteAsync(It.IsAny<DeadLetterRecord>(), It.IsAny<CancellationToken>()), Times.Never);
+            Assert.Contains(logMessages, m => m.Contains("正在保留在途消息"));
+        }
+
         #endregion
 
         #region 并发消费者测试

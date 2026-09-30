@@ -2,6 +2,8 @@
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
@@ -272,7 +274,8 @@ namespace MqttRelayService
                 services.AddSingleton<IMessageQueue>(sp =>
                     new Services.Implementations.Decorators.MetricsMessageQueue(
                         sp.GetRequiredService<InMemoryMessageQueue>(),
-                        sp.GetRequiredService<LazyService<IMetricsService>>()));
+                        sp.GetRequiredService<LazyService<IMetricsService>>(),
+                        sp.GetRequiredService<ILogger<Services.Implementations.Decorators.MetricsMessageQueue>>()));
 
                 services.AddSingleton<IMqttBrokerHost>(sp =>
                     new Services.Implementations.Decorators.MetricsMqttBrokerHost(
@@ -308,7 +311,7 @@ namespace MqttRelayService
                 }
 
                 var requestApiKey = context.HttpContext.Request.Headers["X-Api-Key"].FirstOrDefault();
-                if (string.Equals(requestApiKey, apiKey, StringComparison.Ordinal))
+                if (IsApiKeyMatch(requestApiKey, apiKey))
                 {
                     return await next(context);
                 }
@@ -505,8 +508,10 @@ namespace MqttRelayService
         /// <summary>
         /// 解析筛选日期参数。解析失败必须返回 400，
         /// 不能让调用方拿到"未按时间过滤"的结果集却以为已经过滤。
+        /// 时间语义统一按服务器本机时区解释：不带时区的输入按本机时间处理，
+        /// 带 Z 或偏移量的输入换算成本机时间后再与审计表的本地时间列比较。
         /// </summary>
-        private static bool TryParseFilterDate(string? raw, out DateTime? value)
+        internal static bool TryParseFilterDate(string? raw, out DateTime? value)
         {
             value = null;
             if (string.IsNullOrEmpty(raw))
@@ -514,13 +519,31 @@ namespace MqttRelayService
                 return true;
             }
 
-            if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed))
+            if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var parsed))
             {
-                value = parsed;
+                value = parsed.Kind == DateTimeKind.Utc ? parsed.ToLocalTime() : parsed;
                 return true;
             }
 
             return false;
+        }
+
+        /// <summary>
+        /// 以常量时间比较 API Key，避免通过响应时间差逐字节推测密钥。
+        /// 长度不同的输入直接判定不匹配（长度本身不构成机密信息）。
+        /// </summary>
+        private static bool IsApiKeyMatch(string? provided, string expected)
+        {
+            if (provided == null)
+            {
+                return false;
+            }
+
+            var providedBytes = Encoding.UTF8.GetBytes(provided);
+            var expectedBytes = Encoding.UTF8.GetBytes(expected);
+
+            return providedBytes.Length == expectedBytes.Length
+                && CryptographicOperations.FixedTimeEquals(providedBytes, expectedBytes);
         }
 
         /// <summary>
